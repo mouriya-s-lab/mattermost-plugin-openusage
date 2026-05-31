@@ -15,6 +15,8 @@ const (
 	colorAccent  = "#386FA4"
 	colorWarning = "#B7791F"
 	colorError   = "#C53030"
+
+	barWidth = 12
 )
 
 // renderSnapshots renders one card per provider, in the order returned by the
@@ -35,59 +37,95 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 	return out
 }
 
+// renderSnapshot builds one provider card. Progress limits render as aligned
+// Unicode bars in a monospace block (mirroring the OpenUsage menubar); text and
+// badge lines render as a compact two-column field grid below.
 func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
-	title := displayName(snap)
+	title := statusDot(snap) + " " + displayName(snap)
 	if plan := strings.TrimSpace(derefString(snap.Plan)); plan != "" {
-		title += " — " + plan
+		title += "  ·  " + plan
 	}
 
-	fields := make([]*model.SlackAttachmentField, 0, len(snap.Lines))
+	var progress, textual []metricLine
 	for _, line := range snap.Lines {
-		if f := renderLine(line); f != nil {
-			fields = append(fields, f)
+		switch line.Type {
+		case lineProgress:
+			progress = append(progress, line)
+		default:
+			textual = append(textual, line)
 		}
 	}
 
-	return &model.SlackAttachment{
+	att := &model.SlackAttachment{
 		Title:  title,
 		Color:  snapshotColor(snap),
-		Fields: fields,
 		Footer: snapshotFooter(snap),
 	}
+	att.Text = progressBlock(progress)
+	att.Fields = textualFields(textual)
+	if att.Text == "" && len(att.Fields) == 0 {
+		att.Text = "_No usage lines returned._"
+	}
+	return att
 }
 
-func renderLine(line metricLine) *model.SlackAttachmentField {
-	switch line.Type {
-	case lineText:
-		return shortField(line.Label, withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
-	case lineBadge:
-		return shortField(line.Label, withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
-	case lineProgress:
-		return shortField(line.Label, withSubtitle(formatProgress(line), line.Subtitle))
-	default:
-		// Unknown line type: surface its label rather than dropping it silently.
-		return shortField(emptyAs(line.Label, "Line"), "unsupported line type \""+string(line.Type)+"\"")
+// progressBlock renders the progress lines as an aligned monospace table. Each
+// row is `label  bar  value  · resets in …`, padded so bars and values line up.
+func progressBlock(lines []metricLine) string {
+	if len(lines) == 0 {
+		return ""
 	}
+
+	type row struct{ label, bar, value, reset string }
+	rows := make([]row, 0, len(lines))
+	labelW, valueW := 0, 0
+	for _, line := range lines {
+		r := row{
+			label: emptyAs(strings.TrimSpace(line.Label), "—"),
+			bar:   usageBar(lineUsedPercent(line)),
+			value: progressValue(line),
+			reset: relativeReset(line.ResetsAt),
+		}
+		labelW = max(labelW, len([]rune(r.label)))
+		// Only reset-bearing rows need value alignment (so a long no-reset value
+		// like "1000/1000 credits" doesn't push every "·resets" column rightward).
+		if r.reset != "" {
+			valueW = max(valueW, len([]rune(r.value)))
+		}
+		rows = append(rows, r)
+	}
+
+	var b strings.Builder
+	b.WriteString("```\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%s  %s  ", padRune(r.label, labelW), r.bar)
+		if r.reset != "" {
+			b.WriteString(padRune(r.value, valueW) + "   · " + r.reset)
+		} else {
+			b.WriteString(r.value)
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("```")
+	return b.String()
 }
 
-// formatProgress renders a progress line's used/limit plus a reset hint.
-func formatProgress(line metricLine) string {
-	parts := []string{}
-	if metric := progressMetric(line); metric != "" {
-		parts = append(parts, metric)
+// usageBar draws a fixed-width bar from a 0..100 percentage. NaN renders empty.
+func usageBar(pct float64) string {
+	if math.IsNaN(pct) {
+		return strings.Repeat("░", barWidth)
 	}
-	if reset := resetHint(line.ResetsAt); reset != "" {
-		parts = append(parts, reset)
+	pct = math.Max(0, math.Min(100, pct))
+	filled := int(math.Round(pct / 100 * barWidth))
+	if filled > barWidth {
+		filled = barWidth
 	}
-	if len(parts) == 0 {
-		return "—"
-	}
-	return strings.Join(parts, " · ")
+	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 }
 
-func progressMetric(line metricLine) string {
+// progressValue is the right-hand readout for a progress line, formatted by kind.
+func progressValue(line metricLine) string {
 	used := derefFloat(line.Used)
-	limit := derefFloat(line.Limit)
 	kind := formatPercent
 	suffix := ""
 	if line.Format != nil {
@@ -100,7 +138,7 @@ func progressMetric(line metricLine) string {
 	switch kind {
 	case formatDollars:
 		if line.Limit != nil {
-			return fmt.Sprintf("%s of %s", money(used), money(limit))
+			return money(used) + " / " + money(*line.Limit)
 		}
 		return money(used)
 	case formatCount:
@@ -109,31 +147,101 @@ func progressMetric(line metricLine) string {
 			unit = " " + suffix
 		}
 		if line.Limit != nil {
-			return fmt.Sprintf("%s / %s%s", trimFloat(used), trimFloat(limit), unit)
+			return trimFloat(used) + "/" + trimFloat(*line.Limit) + unit
 		}
 		return trimFloat(used) + unit
 	case formatPercent:
 		fallthrough
 	default:
-		return percentUsed(used, limit, line.Limit != nil) + " used"
+		pct := lineUsedPercent(line)
+		if math.IsNaN(pct) {
+			return "—"
+		}
+		return fmt.Sprintf("%d%%", int(math.Round(pct)))
 	}
 }
 
-// percentUsed converts used/limit into a percentage. OpenUsage percent lines use
-// a 0..limit scale (limit is typically 100), so the percentage is used/limit*100.
-func percentUsed(used, limit float64, hasLimit bool) string {
-	if hasLimit && limit > 0 {
-		return percent(used / limit * 100)
+// textualFields renders text/badge lines as a two-column field grid.
+func textualFields(lines []metricLine) []*model.SlackAttachmentField {
+	if len(lines) == 0 {
+		return nil
 	}
-	return percent(used)
+	fields := make([]*model.SlackAttachmentField, 0, len(lines))
+	for _, line := range lines {
+		var value string
+		switch line.Type {
+		case lineText:
+			value = emptyAs(line.Value, "—")
+		case lineBadge:
+			value = emptyAs(line.Text, "—")
+		default:
+			value = "unsupported line type \"" + string(line.Type) + "\""
+		}
+		fields = append(fields, shortField(emptyAs(line.Label, "—"), withSubtitle(value, line.Subtitle)))
+	}
+	return fields
 }
 
-func resetHint(resetsAt *string) string {
+// relativeReset turns an ISO reset timestamp into "resets in 2h" / "resets in
+// 3d" relative to now. Empty when there is no timestamp.
+func relativeReset(resetsAt *string) string {
 	value := strings.TrimSpace(derefString(resetsAt))
 	if value == "" {
 		return ""
 	}
-	return "resets " + formatTime(value)
+	t, ok := parseISO(value)
+	if !ok {
+		return "resets " + value
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "resets now"
+	}
+	return "resets in " + humanizeDuration(d)
+}
+
+// relativeAgo turns an ISO timestamp into "2m ago" / "3h ago" relative to now.
+func relativeAgo(iso string) string {
+	t, ok := parseISO(strings.TrimSpace(iso))
+	if !ok {
+		return ""
+	}
+	d := time.Since(t)
+	if d < time.Minute {
+		return "just now"
+	}
+	return humanizeDuration(d) + " ago"
+}
+
+// humanizeDuration returns a bare magnitude ("45m", "2h", "3d"), rounded to the
+// nearest unit. Callers add "in "/" ago".
+func humanizeDuration(d time.Duration) string {
+	switch {
+	case d < time.Hour:
+		m := int(math.Round(d.Minutes()))
+		if m < 1 {
+			m = 1
+		}
+		return fmt.Sprintf("%dm", m)
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(math.Round(d.Hours())))
+	default:
+		return fmt.Sprintf("%dd", int(math.Round(d.Hours()/24)))
+	}
+}
+
+// statusDot is a colored severity dot for the card title, matching the card color.
+func statusDot(snap providerSnapshot) string {
+	switch snapshotColor(snap) {
+	case colorError:
+		return "🔴"
+	case colorWarning:
+		return "🟡"
+	case colorGood:
+		return "🟢"
+	default:
+		return "🔵"
+	}
 }
 
 // snapshotColor picks a card color from the worst progress usage in the card.
@@ -192,8 +300,8 @@ func snapshotFooter(snap providerSnapshot) string {
 	if id := strings.TrimSpace(snap.ProviderID); id != "" {
 		footer += " · " + id
 	}
-	if ts := strings.TrimSpace(snap.FetchedAt); ts != "" {
-		footer += " · fetched " + formatTime(ts)
+	if ago := relativeAgo(snap.FetchedAt); ago != "" {
+		footer += " · updated " + ago
 	}
 	return footer
 }
@@ -221,6 +329,25 @@ func errorAttachment(title, text string) *model.SlackAttachment {
 }
 
 // --- small formatting helpers ---
+
+func parseISO(value string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// padRune right-pads s with spaces to w display runes (rune-aware so multibyte
+// labels still align in the monospace block).
+func padRune(s string, w int) string {
+	n := len([]rune(s))
+	if n >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-n)
+}
 
 func withSubtitle(value string, subtitle *string) string {
 	sub := strings.TrimSpace(derefString(subtitle))
@@ -256,17 +383,12 @@ func derefFloat(f *float64) float64 {
 }
 
 // money formats a dollar amount with cent precision, trimming a trailing ".00"
-// or zero cents so "$100.00" reads "$100" while "$12.34" keeps its cents. Unlike
-// trimFloat it never sacrifices cents for larger magnitudes.
+// or zero cents so "$100.00" reads "$100" while "$12.34" keeps its cents.
 func money(v float64) string {
 	s := strconv.FormatFloat(v, 'f', 2, 64)
 	s = strings.TrimRight(s, "0")
 	s = strings.TrimRight(s, ".")
 	return "$" + s
-}
-
-func percent(v float64) string {
-	return trimFloat(v) + "%"
 }
 
 func trimFloat(v float64) string {
@@ -277,13 +399,4 @@ func trimFloat(v float64) string {
 		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", v), "0"), ".")
 	}
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
-}
-
-func formatTime(value string) string {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, value); err == nil {
-			return t.UTC().Format("2006-01-02 15:04 UTC")
-		}
-	}
-	return value
 }
