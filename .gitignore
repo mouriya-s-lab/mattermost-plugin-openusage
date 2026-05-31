@@ -1,0 +1,4 @@
+# Build artifacts
+/dist/
+/server/dist/
+/build/pluginctl/pluginctl

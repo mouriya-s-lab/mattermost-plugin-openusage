@@ -1,0 +1,24 @@
+{
+    "id": "openusage",
+    "name": "OpenUsage",
+    "description": "Private Mattermost bot cards for OpenUsage AI-subscription usage data. Reads the OpenUsage local HTTP API (127.0.0.1:6736) over a netbird-reachable base URL.",
+    "homepage_url": "https://github.com/mouriya-s-lab/mattermost-plugin-openusage",
+    "support_url": "https://github.com/mouriya-s-lab/mattermost-plugin-openusage/issues",
+    "icon_path": "",
+    "version": "0.1.0",
+    "min_server_version": "9.11.0",
+    "server": {
+        "executables": {
+            "linux-amd64": "server/dist/plugin-linux-amd64",
+            "linux-arm64": "server/dist/plugin-linux-arm64",
+            "darwin-amd64": "server/dist/plugin-darwin-amd64",
+            "darwin-arm64": "server/dist/plugin-darwin-arm64",
+            "windows-amd64": "server/dist/plugin-windows-amd64.exe"
+        }
+    },
+    "settings_schema": {
+        "header": "OpenUsage bot for private AI-subscription usage cards. Set OPENUSAGE_BASE_URL on the Mattermost server process to the OpenUsage local HTTP API. OpenUsage binds 127.0.0.1:6736 and that bind address is not configurable, so a remote Mattermost server must point at a netbird-reachable forwarder that proxies to the host Mac's loopback (e.g. http://<mac-netbird-ip>:6736). Defaults to http://127.0.0.1:6736 for same-host installs.",
+        "footer": "See https://github.com/mouriya-s-lab/mattermost-plugin-openusage for setup details.",
+        "settings": []
+    }
+}
