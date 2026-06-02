@@ -69,8 +69,10 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 	return att
 }
 
-// progressBlock renders the progress lines as an aligned monospace table. Each
-// row is `label  bar  value  · resets in …`, padded so bars and values line up.
+// progressBlock renders the progress lines as an aligned monospace table. The
+// bar row is `label  bar  value`; when a line has a reset window it goes on its
+// own indented line *below* the bar (`↳ resets in …`) so the bar row stays
+// narrow and the reset is visible without expanding the card.
 func progressBlock(lines []metricLine) string {
 	if len(lines) == 0 {
 		return ""
@@ -78,7 +80,7 @@ func progressBlock(lines []metricLine) string {
 
 	type row struct{ label, bar, value, reset string }
 	rows := make([]row, 0, len(lines))
-	labelW, valueW := 0, 0
+	labelW := 0
 	for _, line := range lines {
 		r := row{
 			label: emptyAs(strings.TrimSpace(line.Label), "—"),
@@ -87,24 +89,18 @@ func progressBlock(lines []metricLine) string {
 			reset: relativeReset(line.ResetsAt),
 		}
 		labelW = max(labelW, len([]rune(r.label)))
-		// Only reset-bearing rows need value alignment (so a long no-reset value
-		// like "1000/1000 credits" doesn't push every "·resets" column rightward).
-		if r.reset != "" {
-			valueW = max(valueW, len([]rune(r.value)))
-		}
 		rows = append(rows, r)
 	}
 
+	// Reset lines indent to the bar's start column so they read as a caption.
+	indent := strings.Repeat(" ", labelW+2)
 	var b strings.Builder
 	b.WriteString("```\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "%s  %s  ", padRune(r.label, labelW), r.bar)
+		fmt.Fprintf(&b, "%s  %s  %s\n", padRune(r.label, labelW), r.bar, r.value)
 		if r.reset != "" {
-			b.WriteString(padRune(r.value, valueW) + "   · " + r.reset)
-		} else {
-			b.WriteString(r.value)
+			b.WriteString(indent + "↳ " + r.reset + "\n")
 		}
-		b.WriteByte('\n')
 	}
 	b.WriteString("```")
 	return b.String()
