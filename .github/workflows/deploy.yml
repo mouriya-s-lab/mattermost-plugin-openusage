@@ -1,0 +1,75 @@
+name: deploy
+
+# Deploy is a SEPARATE pipeline from release. `release` builds and publishes the
+# bundle to GitHub Releases; `deploy` installs an already-published bundle onto
+# the running Mattermost via its plugin REST API. It runs after a successful
+# `release` run, or manually for a specific version.
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to deploy (default: latest release)"
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    # workflow_run fires for every release run; only deploy on success.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN_ID: openusage
+      MM_URL: https://mattermost.237575.xyz
+      MM_ADMIN_TOKEN: ${{ secrets.MM_ADMIN_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      VERSION_INPUT: ${{ github.event.inputs.version }}
+    steps:
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          VER="${VERSION_INPUT:-}"
+          if [ -z "$VER" ]; then
+            VER="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          echo "tag=$VER" >> "$GITHUB_OUTPUT"
+          echo "deploying ${PLUGIN_ID} ${VER}"
+
+      - name: Install onto Mattermost
+        env:
+          VER: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          : "${MM_ADMIN_TOKEN:?MM_ADMIN_TOKEN secret not set}"
+          ASSET="${PLUGIN_ID}-${VER#v}.tar.gz"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VER}/${ASSET}"
+          echo "downloading ${URL}"
+          curl -fSL -o plugin.tar.gz "${URL}"
+          echo "uploading to ${MM_URL}"
+          curl -fsS -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" \
+            -F "plugin=@plugin.tar.gz" -F "force=true" \
+            "${MM_URL}/api/v4/plugins" -o upload.json
+          python3 -c "import json;d=json.load(open('upload.json'));print('uploaded',d['id'],d['version'])"
+          echo "enabling"
+          curl -fsS -X POST -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" \
+            "${MM_URL}/api/v4/plugins/${PLUGIN_ID}/enable"
+
+      - name: Verify active version
+        env:
+          VER: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer ${MM_ADMIN_TOKEN}" "${MM_URL}/api/v4/plugins" -o plugins.json
+          python3 - <<'PY'
+          import json, os, sys
+          want = os.environ["VER"].lstrip("v")
+          pid = os.environ["PLUGIN_ID"]
+          d = json.load(open("plugins.json"))
+          active = {p["id"]: p["version"] for p in d.get("active", [])}
+          got = active.get(pid)
+          print(f"active {pid} = {got}, want {want}")
+          sys.exit(0 if got == want else 1)
+          PY
