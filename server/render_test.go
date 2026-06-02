@@ -175,3 +175,31 @@ func TestProgressBlockAligns(t *testing.T) {
 		t.Errorf("bars not aligned: %d vs %d\n%s", c0, c1, block)
 	}
 }
+
+// TestProgressResetBelowBar asserts the reset window is on its own line below
+// the bar (not trailing the bar row), indented under the bar's start column.
+func TestProgressResetBelowBar(t *testing.T) {
+	u, l := 42.0, 100.0
+	reset := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	line := metricLine{
+		Type: lineProgress, Label: "Session", Used: &u, Limit: &l,
+		Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
+	}
+	block := progressBlock([]metricLine{line})
+	rows := strings.Split(strings.Trim(block, "`\n"), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("want bar row + reset row, got %d: %q", len(rows), block)
+	}
+	if !strings.Contains(rows[0], "█") || strings.Contains(rows[0], "resets") {
+		t.Errorf("bar row should hold the bar and no reset text: %q", rows[0])
+	}
+	if !strings.Contains(rows[1], "resets in 2h") {
+		t.Errorf("reset row missing reset window: %q", rows[1])
+	}
+	// Reset row indents past the label so it sits under the bar.
+	barCol := strings.Index(rows[0], "█")
+	resetCol := strings.IndexFunc(rows[1], func(r rune) bool { return r != ' ' })
+	if resetCol < barCol {
+		t.Errorf("reset row not indented under bar: resetCol=%d barCol=%d\n%s", resetCol, barCol, block)
+	}
+}
