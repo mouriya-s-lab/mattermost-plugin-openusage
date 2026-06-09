@@ -47,9 +47,13 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.HasPrefix(att.Title, "🟢") { // 42% -> good
 		t.Errorf("title should lead with green dot: %q", att.Title)
 	}
-	// Progress bar lives in the monospace Text block.
-	if !strings.Contains(att.Text, "```") || !strings.Contains(att.Text, "█") {
-		t.Errorf("text missing bar block: %q", att.Text)
+	// Progress, text, and badges live in markdown Text, not Mattermost short
+	// fields/code blocks, because those clipped in production.
+	if strings.Contains(att.Text, "```") || len(att.Fields) != 0 {
+		t.Errorf("text should avoid code blocks and fields: text=%q fields=%+v", att.Text, att.Fields)
+	}
+	if !strings.Contains(att.Text, "■") {
+		t.Errorf("text missing inline bar: %q", att.Text)
 	}
 	if !strings.Contains(att.Text, "42%") {
 		t.Errorf("text missing 42%%: %q", att.Text)
@@ -57,12 +61,8 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Text, "Session") {
 		t.Errorf("text missing label: %q", att.Text)
 	}
-	// Text line becomes a field.
-	if len(att.Fields) != 1 || att.Fields[0].Title != "Today" {
-		t.Fatalf("fields = %+v", att.Fields)
-	}
-	if v, _ := att.Fields[0].Value.(string); !strings.Contains(v, "$5.17") {
-		t.Errorf("today field = %q", v)
+	if !strings.Contains(att.Text, "Today") || !strings.Contains(att.Text, "$5.17") {
+		t.Errorf("text missing Today detail: %q", att.Text)
 	}
 	if att.Color != colorGood {
 		t.Errorf("color = %q, want good", att.Color)
@@ -74,11 +74,11 @@ func TestUsageBar(t *testing.T) {
 		pct        float64
 		wantFilled int
 	}{
-		{0, 0}, {100, barWidth}, {50, barWidth / 2}, {42, 5}, {200, barWidth}, {-5, 0},
+		{0, 0}, {100, barWidth}, {50, barWidth / 2}, {42, 4}, {200, barWidth}, {-5, 0},
 	}
 	for _, tt := range tests {
 		bar := usageBar(tt.pct)
-		if got := strings.Count(bar, "█"); got != tt.wantFilled {
+		if got := strings.Count(bar, "■"); got != tt.wantFilled {
 			t.Errorf("usageBar(%v) filled=%d, want %d (bar=%q)", tt.pct, got, tt.wantFilled, bar)
 		}
 		if total := len([]rune(bar)); total != barWidth {
@@ -141,7 +141,7 @@ func TestRenderSnapshotsEmpty(t *testing.T) {
 	}
 }
 
-func TestBadgeAndSubtitleField(t *testing.T) {
+func TestBadgeAndSubtitleText(t *testing.T) {
 	sub := "Last sync 5m ago"
 	snap := providerSnapshot{
 		ProviderID:  "x",
@@ -149,57 +149,76 @@ func TestBadgeAndSubtitleField(t *testing.T) {
 		Lines:       []metricLine{{Type: lineBadge, Label: "Status", Text: "Connected", Subtitle: &sub}},
 	}
 	att := renderSnapshot(snap)
-	if len(att.Fields) != 1 {
-		t.Fatalf("fields = %+v", att.Fields)
+	if len(att.Fields) != 0 {
+		t.Fatalf("fields should stay empty to avoid Mattermost clipping: %+v", att.Fields)
 	}
-	v, _ := att.Fields[0].Value.(string)
-	if !strings.Contains(v, "Connected") || !strings.Contains(v, "Last sync 5m ago") {
-		t.Errorf("badge field = %q", v)
+	if !strings.Contains(att.Text, "Connected") || !strings.Contains(att.Text, "Last sync 5m ago") {
+		t.Errorf("badge text = %q", att.Text)
 	}
 }
 
-func TestProgressBlockAligns(t *testing.T) {
+func TestProgressSectionRendersInlineRows(t *testing.T) {
 	mk := func(label string, used float64) metricLine {
 		u, l := used, 100.0
 		return metricLine{Type: lineProgress, Label: label, Used: &u, Limit: &l, Format: &lineFormat{Kind: formatPercent}}
 	}
-	block := progressBlock([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
-	lines := strings.Split(strings.Trim(block, "`\n"), "\n")
+	block := progressSection([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
+	lines := strings.Split(block, "\n")
 	if len(lines) != 2 {
 		t.Fatalf("want 2 rows, got %d: %q", len(lines), block)
 	}
-	// Bars start at the same column => labels padded to equal width.
-	c0 := strings.Index(lines[0], "█")
-	c1 := strings.Index(lines[1], "░")
-	if c0 != c1 {
-		t.Errorf("bars not aligned: %d vs %d\n%s", c0, c1, block)
+	for _, want := range []string{"• **Session**", "20%", "• **Spark Weekly**", "0%"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("progress section missing %q: %q", want, block)
+		}
+	}
+	if strings.Contains(block, "```") {
+		t.Errorf("progress section should not use code fences: %q", block)
 	}
 }
 
-// TestProgressResetBelowBar asserts the reset window is on its own line below
-// the bar (not trailing the bar row), indented under the bar's start column.
-func TestProgressResetBelowBar(t *testing.T) {
+func TestProgressResetInline(t *testing.T) {
 	u, l := 42.0, 100.0
 	reset := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 	line := metricLine{
 		Type: lineProgress, Label: "Session", Used: &u, Limit: &l,
 		Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
 	}
-	block := progressBlock([]metricLine{line})
-	rows := strings.Split(strings.Trim(block, "`\n"), "\n")
-	if len(rows) != 2 {
-		t.Fatalf("want bar row + reset row, got %d: %q", len(rows), block)
+	block := progressSection([]metricLine{line})
+	if strings.Count(block, "\n") != 0 {
+		t.Fatalf("single progress line should stay on one markdown row: %q", block)
 	}
-	if !strings.Contains(rows[0], "█") || strings.Contains(rows[0], "resets") {
-		t.Errorf("bar row should hold the bar and no reset text: %q", rows[0])
-	}
-	if !strings.Contains(rows[1], "resets in 2h") {
-		t.Errorf("reset row missing reset window: %q", rows[1])
-	}
-	// Reset row indents past the label so it sits under the bar.
-	barCol := strings.Index(rows[0], "█")
-	resetCol := strings.IndexFunc(rows[1], func(r rune) bool { return r != ' ' })
-	if resetCol < barCol {
-		t.Errorf("reset row not indented under bar: resetCol=%d barCol=%d\n%s", resetCol, barCol, block)
+	if !strings.Contains(block, "■") || !strings.Contains(block, "42%") || !strings.Contains(block, "resets in 2h") {
+		t.Errorf("progress row missing data: %q", block)
 	}
 }
+
+func TestBarChartRendersWithoutUnsupportedLine(t *testing.T) {
+	snap := providerSnapshot{
+		ProviderID:  "codex",
+		DisplayName: "Codex",
+		Lines: []metricLine{
+			{
+				Type:  lineBarChart,
+				Label: "Usage Trend",
+				Points: []chartPoint{
+					{Label: "6/7", Value: 10, ValueLabel: "10M tokens"},
+					{Label: "6/8", Value: 30, ValueLabel: "30M tokens"},
+					{Label: "6/9", Value: 20, ValueLabel: "20M tokens"},
+				},
+				Note: strPtr("Estimated from logs."),
+			},
+		},
+	}
+	att := renderSnapshot(snap)
+	for _, want := range []string{"**Usage Trend**", "▃█▆", "Latest 6/9: 20M tokens", "Peak 6/8: 30M tokens", "Estimated from logs."} {
+		if !strings.Contains(att.Text, want) {
+			t.Errorf("chart render missing %q: %q", want, att.Text)
+		}
+	}
+	if strings.Contains(att.Text, "unsupported line type") {
+		t.Errorf("chart should not render unsupported marker: %q", att.Text)
+	}
+}
+
+func strPtr(s string) *string { return &s }
