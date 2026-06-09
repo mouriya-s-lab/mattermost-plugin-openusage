@@ -167,11 +167,11 @@ func TestProgressSectionRendersInlineRows(t *testing.T) {
 		return metricLine{Type: lineProgress, Label: label, Used: &u, Limit: &l, Format: &lineFormat{Kind: formatPercent}}
 	}
 	block := progressSection([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
-	lines := strings.Split(block, "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 rows, got %d: %q", len(lines), block)
+	sections := strings.Split(block, "\n\n")
+	if len(sections) != 2 {
+		t.Fatalf("want 2 separated limit sections, got %d: %q", len(sections), block)
 	}
-	for _, want := range []string{"• **Session**", "20%", "• **Spark Weekly**", "0%"} {
+	for _, want := range []string{"**Session**", "20%", "**Spark Weekly**", "0%"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("progress section missing %q: %q", want, block)
 		}
@@ -189,8 +189,8 @@ func TestProgressResetInline(t *testing.T) {
 		Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
 	}
 	block := progressSection([]metricLine{line})
-	if strings.Count(block, "\n") != 0 {
-		t.Fatalf("single progress line should stay on one markdown row: %q", block)
+	if strings.Count(block, "\n") != 2 {
+		t.Fatalf("single progress line should render as label/value/bar lines: %q", block)
 	}
 	if !strings.Contains(block, "■") || !strings.Contains(block, "42%") || !strings.Contains(block, "resets in 2h") {
 		t.Errorf("progress row missing data: %q", block)

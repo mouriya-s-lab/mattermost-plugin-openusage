@@ -43,7 +43,7 @@ func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
 
 	if len(main.progress) > 0 && len(main.textual) > 0 {
 		cards = append(cards, &model.SlackAttachment{
-			Title:  "💵 " + displayName(snap) + " · Spend",
+			Title:  displayName(snap) + " · Spend",
 			Text:   compactTextualSection(main.textual),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
@@ -51,7 +51,7 @@ func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
 	}
 	if len(modelMix) > 0 {
 		cards = append(cards, &model.SlackAttachment{
-			Title:  "🧠 " + displayName(snap) + " · Models",
+			Title:  displayName(snap) + " · Models",
 			Text:   compactTextualSection(modelMix),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
@@ -142,17 +142,13 @@ func progressSection(lines []metricLine) string {
 
 	rows := make([]string, 0, len(lines))
 	for _, line := range lines {
-		parts := []string{
-			"• **" + emptyAs(strings.TrimSpace(line.Label), "—") + "**",
-			usageBar(lineUsedPercent(line)),
-			progressValue(line),
-		}
+		value := progressValue(line)
 		if reset := relativeReset(line.ResetsAt); reset != "" {
-			parts = append(parts, "· "+reset)
+			value += " · " + reset
 		}
-		rows = append(rows, strings.Join(parts, " "))
+		rows = append(rows, "**"+emptyAs(strings.TrimSpace(line.Label), "—")+"**\n"+value+"\n"+usageBar(lineUsedPercent(line)))
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(rows, "\n\n")
 }
 
 // usageBar draws a fixed-width inline bar from a 0..100 percentage. NaN renders
@@ -195,12 +191,12 @@ func compactTextualSection(lines []metricLine) string {
 	for _, line := range lines {
 		switch line.Type {
 		case lineText:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**  "+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**\n"+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
 		case lineBadge:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**  "+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**\n"+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
 		}
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(rows, "\n\n")
 }
 
 // progressValue is the right-hand readout for a progress line, formatted by kind.
