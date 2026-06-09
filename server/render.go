@@ -38,9 +38,17 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 }
 
 func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
-	_, charts, modelMix := splitSnapshotLines(snap)
+	main, charts, modelMix := splitSnapshotLines(snap)
 	cards := []*model.SlackAttachment{renderSnapshot(snap)}
 
+	if len(main.progress) > 0 && len(main.textual) > 0 {
+		cards = append(cards, &model.SlackAttachment{
+			Title:  "💵 " + displayName(snap) + " · Spend",
+			Text:   textualSection(main.textual),
+			Color:  colorAccent,
+			Footer: snapshotFooter(snap),
+		})
+	}
 	for _, chart := range charts {
 		if s := chartSection(chart); s != "" {
 			cards = append(cards, &model.SlackAttachment{
@@ -80,7 +88,11 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	att.Text = snapshotText(main.progress, main.textual)
+	if len(main.progress) > 0 {
+		att.Text = snapshotText(main.progress, nil)
+	} else {
+		att.Text = snapshotText(nil, main.textual)
+	}
 	if att.Text == "" {
 		att.Text = "_No usage lines returned._"
 	}

@@ -39,7 +39,11 @@ func TestParseSnapshotDocSample(t *testing.T) {
 
 func TestRenderSnapshotDocSample(t *testing.T) {
 	snap, _ := parseSnapshot([]byte(docSample))
-	att := renderSnapshot(snap)
+	cards := renderSnapshotCards(snap)
+	if len(cards) != 2 {
+		t.Fatalf("want limits + spend cards, got %d: %+v", len(cards), cards)
+	}
+	att := cards[0]
 
 	if !strings.Contains(att.Title, "Claude") || !strings.Contains(att.Title, "Team 5x") {
 		t.Errorf("title = %q", att.Title)
@@ -61,8 +65,8 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Text, "Session") {
 		t.Errorf("text missing label: %q", att.Text)
 	}
-	if !strings.Contains(att.Text, "Today") || !strings.Contains(att.Text, "$5.17") {
-		t.Errorf("text missing Today detail: %q", att.Text)
+	if strings.Contains(att.Text, "Today") || !strings.Contains(cards[1].Text, "Today") || !strings.Contains(cards[1].Text, "$5.17") {
+		t.Errorf("spend split wrong: main=%q spend=%q", att.Text, cards[1].Text)
 	}
 	if att.Color != colorGood {
 		t.Errorf("color = %q, want good", att.Color)
