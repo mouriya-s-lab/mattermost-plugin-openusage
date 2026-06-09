@@ -39,12 +39,15 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 
 func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
 	main, _, modelMix := splitSnapshotLines(snap)
-	cards := []*model.SlackAttachment{renderSnapshot(snap)}
+	cards := make([]*model.SlackAttachment, 0, len(main.progress)+2)
 
-	if len(main.progress) > 0 && len(main.textual) > 0 {
+	for _, line := range main.progress {
+		cards = append(cards, renderProgressCard(snap, line))
+	}
+	if len(main.textual) > 0 {
 		cards = append(cards, &model.SlackAttachment{
 			Title:  displayName(snap) + " · Spend",
-			Text:   compactTextualSection(main.textual),
+			Text:   inlineTextualSection(main.textual),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
 		})
@@ -52,12 +55,33 @@ func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
 	if len(modelMix) > 0 {
 		cards = append(cards, &model.SlackAttachment{
 			Title:  displayName(snap) + " · Models",
-			Text:   compactTextualSection(modelMix),
+			Text:   inlineTextualSection(modelMix),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
 		})
 	}
+	if len(cards) == 0 {
+		cards = append(cards, renderSnapshot(snap))
+	}
 	return cards
+}
+
+func renderProgressCard(snap providerSnapshot, line metricLine) *model.SlackAttachment {
+	label := emptyAs(strings.TrimSpace(line.Label), "—")
+	value := progressValue(line)
+	if reset := relativeReset(line.ResetsAt); reset != "" {
+		value += " · " + reset
+	}
+	title := displayName(snap) + " · " + label
+	if plan := strings.TrimSpace(derefString(snap.Plan)); plan != "" {
+		title += " · " + plan
+	}
+	return &model.SlackAttachment{
+		Title:  title,
+		Text:   value + "  \n" + usageBar(lineUsedPercent(line)),
+		Color:  progressColor(line),
+		Footer: snapshotFooter(snap),
+	}
 }
 
 // renderSnapshot builds one provider card. Everything lives in attachment Text
@@ -199,6 +223,22 @@ func compactTextualSection(lines []metricLine) string {
 	return strings.Join(rows, "\n\n")
 }
 
+func inlineTextualSection(lines []metricLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	rows := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch line.Type {
+		case lineText:
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"** — "+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
+		case lineBadge:
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"** — "+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
+		}
+	}
+	return strings.Join(rows, "  \n")
+}
+
 // progressValue is the right-hand readout for a progress line, formatted by kind.
 func progressValue(line metricLine) string {
 	used := derefFloat(line.Used)
@@ -321,6 +361,21 @@ func snapshotColor(snap providerSnapshot) string {
 	case maxPct >= 90:
 		return colorError
 	case maxPct >= 70:
+		return colorWarning
+	default:
+		return colorGood
+	}
+}
+
+func progressColor(line metricLine) string {
+	pct := lineUsedPercent(line)
+	if math.IsNaN(pct) {
+		return colorAccent
+	}
+	switch {
+	case pct >= 90:
+		return colorError
+	case pct >= 70:
 		return colorWarning
 	default:
 		return colorGood

@@ -48,9 +48,6 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Title, "Claude") || !strings.Contains(att.Title, "Team 5x") {
 		t.Errorf("title = %q", att.Title)
 	}
-	if !strings.HasPrefix(att.Title, "🟢") { // 42% -> good
-		t.Errorf("title should lead with green dot: %q", att.Title)
-	}
 	// Progress, text, and badges live in markdown Text, not Mattermost short
 	// fields/code blocks, because those clipped in production.
 	if strings.Contains(att.Text, "```") || len(att.Fields) != 0 {
@@ -62,8 +59,8 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Text, "42%") {
 		t.Errorf("text missing 42%%: %q", att.Text)
 	}
-	if !strings.Contains(att.Text, "Session") {
-		t.Errorf("text missing label: %q", att.Text)
+	if !strings.Contains(att.Title, "Session") {
+		t.Errorf("title missing label: %q", att.Title)
 	}
 	if strings.Contains(att.Text, "Today") || !strings.Contains(cards[1].Text, "Today") || !strings.Contains(cards[1].Text, "$5.17") {
 		t.Errorf("spend split wrong: main=%q spend=%q", att.Text, cards[1].Text)
