@@ -32,9 +32,34 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 	}
 	out := make([]*model.SlackAttachment, 0, len(snaps))
 	for _, snap := range snaps {
-		out = append(out, renderSnapshot(snap))
+		out = append(out, renderSnapshotCards(snap)...)
 	}
 	return out
+}
+
+func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
+	_, charts, modelMix := splitSnapshotLines(snap)
+	cards := []*model.SlackAttachment{renderSnapshot(snap)}
+
+	for _, chart := range charts {
+		if s := chartSection(chart); s != "" {
+			cards = append(cards, &model.SlackAttachment{
+				Title:  "📈 " + displayName(snap) + " · " + emptyAs(chart.Label, "Trend"),
+				Text:   s,
+				Color:  colorAccent,
+				Footer: snapshotFooter(snap),
+			})
+		}
+	}
+	if len(modelMix) > 0 {
+		cards = append(cards, &model.SlackAttachment{
+			Title:  "🧠 " + displayName(snap) + " · Model mix",
+			Text:   textualSection(modelMix),
+			Color:  colorAccent,
+			Footer: snapshotFooter(snap),
+		})
+	}
+	return cards
 }
 
 // renderSnapshot builds one provider card. Everything lives in attachment Text
@@ -48,42 +73,59 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 		title += "  ·  " + plan
 	}
 
-	var progress, textual, charts []metricLine
-	for _, line := range snap.Lines {
-		switch line.Type {
-		case lineProgress:
-			progress = append(progress, line)
-		case lineBarChart:
-			charts = append(charts, line)
-		default:
-			textual = append(textual, line)
-		}
-	}
+	main, _, _ := splitSnapshotLines(snap)
 
 	att := &model.SlackAttachment{
 		Title:  title,
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	att.Text = snapshotText(progress, textual, charts)
+	att.Text = snapshotText(main.progress, main.textual)
 	if att.Text == "" {
 		att.Text = "_No usage lines returned._"
 	}
 	return att
 }
 
-func snapshotText(progress, textual, charts []metricLine) string {
+type mainSnapshotLines struct {
+	progress []metricLine
+	textual  []metricLine
+}
+
+func splitSnapshotLines(snap providerSnapshot) (mainSnapshotLines, []metricLine, []metricLine) {
+	var main mainSnapshotLines
+	var charts, modelMix []metricLine
+	for _, line := range snap.Lines {
+		switch line.Type {
+		case lineProgress:
+			main.progress = append(main.progress, line)
+		case lineBarChart:
+			charts = append(charts, line)
+		case lineText:
+			if isPercentValue(line.Value) {
+				modelMix = append(modelMix, line)
+			} else {
+				main.textual = append(main.textual, line)
+			}
+		default:
+			main.textual = append(main.textual, line)
+		}
+	}
+	return main, charts, modelMix
+}
+
+func isPercentValue(value string) bool {
+	v := strings.TrimSpace(value)
+	return strings.HasSuffix(v, "%")
+}
+
+func snapshotText(progress, textual []metricLine) string {
 	var sections []string
 	if s := progressSection(progress); s != "" {
 		sections = append(sections, "**Limits**\n"+s)
 	}
 	if s := textualSection(textual); s != "" {
 		sections = append(sections, "**Details**\n"+s)
-	}
-	for _, chart := range charts {
-		if s := chartSection(chart); s != "" {
-			sections = append(sections, "**"+emptyAs(chart.Label, "Trend")+"**\n"+s)
-		}
 	}
 	return strings.Join(sections, "\n\n")
 }

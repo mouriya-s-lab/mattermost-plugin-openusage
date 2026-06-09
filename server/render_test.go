@@ -210,14 +210,41 @@ func TestBarChartRendersWithoutUnsupportedLine(t *testing.T) {
 			},
 		},
 	}
-	att := renderSnapshot(snap)
-	for _, want := range []string{"**Usage Trend**", "▃█▆", "Latest 6/9: 20M tokens", "Peak 6/8: 30M tokens", "Estimated from logs."} {
-		if !strings.Contains(att.Text, want) {
-			t.Errorf("chart render missing %q: %q", want, att.Text)
+	cards := renderSnapshotCards(snap)
+	if len(cards) != 2 {
+		t.Fatalf("want main + chart cards, got %d: %+v", len(cards), cards)
+	}
+	att := cards[1]
+	for _, want := range []string{"Usage Trend", "▃█▆", "Latest 6/9: 20M tokens", "Peak 6/8: 30M tokens", "Estimated from logs."} {
+		haystack := att.Title + "\n" + att.Text
+		if !strings.Contains(haystack, want) {
+			t.Errorf("chart render missing %q: title=%q text=%q", want, att.Title, att.Text)
 		}
 	}
 	if strings.Contains(att.Text, "unsupported line type") {
 		t.Errorf("chart should not render unsupported marker: %q", att.Text)
+	}
+}
+
+func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
+	snap := providerSnapshot{
+		ProviderID:  "claude",
+		DisplayName: "Claude",
+		Lines: []metricLine{
+			{Type: lineText, Label: "Today", Value: "$1.23 · 1M tokens"},
+			{Type: lineText, Label: "claude-opus", Value: "99.9%"},
+			{Type: lineText, Label: "claude-haiku", Value: "<0.1%"},
+		},
+	}
+	cards := renderSnapshotCards(snap)
+	if len(cards) != 2 {
+		t.Fatalf("want main + model cards, got %d: %+v", len(cards), cards)
+	}
+	if strings.Contains(cards[0].Text, "claude-opus") || !strings.Contains(cards[0].Text, "Today") {
+		t.Errorf("main card should keep spend but not model mix: %q", cards[0].Text)
+	}
+	if !strings.Contains(cards[1].Title, "Model mix") || !strings.Contains(cards[1].Text, "claude-opus") || !strings.Contains(cards[1].Text, "claude-haiku") {
+		t.Errorf("model card wrong: title=%q text=%q", cards[1].Title, cards[1].Text)
 	}
 }
 
