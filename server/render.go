@@ -53,34 +53,33 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 	}
 
 	main, _, modelMix := splitSnapshotLines(snap)
-
 	att := &model.SlackAttachment{
 		Title:  title,
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	att.Text = providerSummaryText(main.progress, main.textual, modelMix)
-	if att.Text == "" {
+	att.Fields = providerFields(main.progress, main.textual, modelMix)
+	if len(att.Fields) == 0 {
 		att.Text = "_No usage lines returned._"
 	}
 	return att
 }
 
-func providerSummaryText(progress, spend, models []metricLine) string {
-	sections := make([]string, 0, 3)
-	if s := inlineProgressSection(progress); s != "" {
-		sections = append(sections, "**Limits** — "+s)
+func providerFields(progress, spend, models []metricLine) []*model.SlackAttachmentField {
+	fields := make([]*model.SlackAttachmentField, 0, 3)
+	if s := limitFieldValue(progress); s != "" {
+		fields = append(fields, fullField("Limits", s))
 	}
-	if s := inlineTextualSection(spend); s != "" {
-		sections = append(sections, "**Spend** — "+s)
+	if s := spendFieldValue(spend); s != "" {
+		fields = append(fields, fullField("Spend", s))
 	}
-	if s := inlineTextualSection(models); s != "" {
-		sections = append(sections, "**Models** — "+s)
+	if s := modelsFieldValue(models); s != "" {
+		fields = append(fields, fullField("Models", s))
 	}
-	return strings.Join(sections, "  \n")
+	return fields
 }
 
-func inlineProgressSection(lines []metricLine) string {
+func limitFieldValue(lines []metricLine) string {
 	if len(lines) == 0 {
 		return ""
 	}
@@ -90,7 +89,35 @@ func inlineProgressSection(lines []metricLine) string {
 		if reset := shortReset(line.ResetsAt); reset != "" {
 			value += " / " + reset
 		}
-		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+value+" "+usageBar(lineUsedPercent(line)))
+		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+value)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func spendFieldValue(lines []metricLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line.Type != lineText && line.Type != lineBadge {
+			continue
+		}
+		parts = append(parts, compactMetricLabel(line.Label)+" "+lineDisplayValue(line))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func modelsFieldValue(lines []metricLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line.Type != lineText && line.Type != lineBadge {
+			continue
+		}
+		parts = append(parts, compactModelLabel(line.Label)+" "+lineDisplayValue(line))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -205,20 +232,35 @@ func compactTextualSection(lines []metricLine) string {
 	return strings.Join(rows, "\n\n")
 }
 
-func inlineTextualSection(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
+func fullField(title, value string) *model.SlackAttachmentField {
+	return &model.SlackAttachmentField{Title: title, Value: value, Short: false}
+}
+
+func lineDisplayValue(line metricLine) string {
+	switch line.Type {
+	case lineText:
+		return plainWithSubtitle(emptyAs(line.Value, "—"), line.Subtitle)
+	case lineBadge:
+		return plainWithSubtitle(emptyAs(line.Text, "—"), line.Subtitle)
+	default:
+		return "—"
 	}
-	rows := make([]string, 0, len(lines))
-	for _, line := range lines {
-		switch line.Type {
-		case lineText:
-			rows = append(rows, emptyAs(line.Label, "—")+" "+plainWithSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
-		case lineBadge:
-			rows = append(rows, emptyAs(line.Label, "—")+" "+plainWithSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
-		}
+}
+
+func compactMetricLabel(label string) string {
+	switch strings.TrimSpace(label) {
+	case "Last 30 Days":
+		return "30d"
+	default:
+		return emptyAs(label, "—")
 	}
-	return strings.Join(rows, " · ")
+}
+
+func compactModelLabel(label string) string {
+	label = strings.TrimSpace(label)
+	label = strings.TrimPrefix(label, "claude-")
+	label = strings.TrimPrefix(label, "gpt-")
+	return emptyAs(label, "—")
 }
 
 func shortReset(resetsAt *string) string {

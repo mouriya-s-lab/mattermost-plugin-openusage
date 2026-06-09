@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mattermost/mattermost/server/public/model"
 )
 
 // docSample is the exact response shape from docs/local-http-api.md.
@@ -48,22 +50,17 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Title, "Claude") || !strings.Contains(att.Title, "Team 5x") {
 		t.Errorf("title = %q", att.Title)
 	}
-	// Progress, text, and badges live in markdown Text, not Mattermost short
-	// fields/code blocks, because those clipped in production.
-	if strings.Contains(att.Text, "```") || len(att.Fields) != 0 {
-		t.Errorf("text should avoid code blocks and fields: text=%q fields=%+v", att.Text, att.Fields)
+	if att.Text != "" {
+		t.Errorf("provider card should use fields, not text wall: %q", att.Text)
 	}
-	if !strings.Contains(att.Text, "■") {
-		t.Errorf("text missing inline bar: %q", att.Text)
+	if len(att.Fields) != 2 {
+		t.Fatalf("want Limits + Spend fields, got %+v", att.Fields)
 	}
-	if !strings.Contains(att.Text, "42%") {
-		t.Errorf("text missing 42%%: %q", att.Text)
+	if att.Fields[0].Title != "Limits" || !strings.Contains(fieldValue(att.Fields[0]), "Session 42%") {
+		t.Errorf("limits field wrong: %+v", att.Fields[0])
 	}
-	if !strings.Contains(att.Text, "Session") {
-		t.Errorf("text missing label: %q", att.Text)
-	}
-	if !strings.Contains(att.Text, "Spend") || !strings.Contains(att.Text, "Today $5.17") {
-		t.Errorf("spend missing from provider card: %q", att.Text)
+	if att.Fields[1].Title != "Spend" || !strings.Contains(fieldValue(att.Fields[1]), "Today $5.17") {
+		t.Errorf("spend field wrong: %+v", att.Fields[1])
 	}
 	if att.Color != colorGood {
 		t.Errorf("color = %q, want good", att.Color)
@@ -150,11 +147,11 @@ func TestBadgeAndSubtitleText(t *testing.T) {
 		Lines:       []metricLine{{Type: lineBadge, Label: "Status", Text: "Connected", Subtitle: &sub}},
 	}
 	att := renderSnapshot(snap)
-	if len(att.Fields) != 0 {
-		t.Fatalf("fields should stay empty to avoid Mattermost clipping: %+v", att.Fields)
+	if len(att.Fields) != 1 {
+		t.Fatalf("fields = %+v", att.Fields)
 	}
-	if !strings.Contains(att.Text, "Connected") || !strings.Contains(att.Text, "Last sync 5m ago") {
-		t.Errorf("badge text = %q", att.Text)
+	if !strings.Contains(fieldValue(att.Fields[0]), "Connected") || !strings.Contains(fieldValue(att.Fields[0]), "Last sync 5m ago") {
+		t.Errorf("badge field = %+v", att.Fields[0])
 	}
 }
 
@@ -215,7 +212,7 @@ func TestBarChartIsIgnored(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("want one provider card; trend should not render, got %d: %+v", len(cards), cards)
 	}
-	joined := cards[0].Title + "\n" + cards[0].Text
+	joined := cards[0].Title + "\n" + fieldsText(cards[0].Fields)
 	for _, bad := range []string{"Usage Trend", "Estimated from logs.", "unsupported line type"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("barChart leaked %q into render: %q", bad, joined)
@@ -237,12 +234,28 @@ func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("want one provider card, got %d: %+v", len(cards), cards)
 	}
-	if !strings.Contains(cards[0].Text, "Spend") || !strings.Contains(cards[0].Text, "Today $1.23") {
-		t.Errorf("provider card missing spend: %q", cards[0].Text)
+	joined := fieldsText(cards[0].Fields)
+	if !strings.Contains(joined, "Spend") || !strings.Contains(joined, "Today $1.23") {
+		t.Errorf("provider card missing spend: %s", joined)
 	}
-	if !strings.Contains(cards[0].Text, "Models") || !strings.Contains(cards[0].Text, "claude-opus 99.9%") || !strings.Contains(cards[0].Text, "claude-haiku <0.1%") {
-		t.Errorf("provider card missing models: %q", cards[0].Text)
+	if !strings.Contains(joined, "Models") || !strings.Contains(joined, "opus 99.9%") || !strings.Contains(joined, "haiku <0.1%") {
+		t.Errorf("provider card missing models: %s", joined)
 	}
+}
+
+func fieldValue(f *model.SlackAttachmentField) string {
+	if f == nil || f.Value == nil {
+		return ""
+	}
+	return f.Value.(string)
+}
+
+func fieldsText(fields []*model.SlackAttachmentField) string {
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		parts = append(parts, f.Title+" "+fieldValue(f))
+	}
+	return strings.Join(parts, "\n")
 }
 
 func strPtr(s string) *string { return &s }
