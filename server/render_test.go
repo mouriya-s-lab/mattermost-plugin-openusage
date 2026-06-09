@@ -197,36 +197,32 @@ func TestProgressResetInline(t *testing.T) {
 	}
 }
 
-func TestBarChartRendersWithoutUnsupportedLine(t *testing.T) {
+func TestBarChartIsIgnored(t *testing.T) {
 	snap := providerSnapshot{
 		ProviderID:  "codex",
 		DisplayName: "Codex",
 		Lines: []metricLine{
+			{Type: lineText, Label: "Today", Value: "$1.23 · 1M tokens"},
 			{
 				Type:  lineBarChart,
 				Label: "Usage Trend",
 				Points: []chartPoint{
 					{Label: "6/7", Value: 10, ValueLabel: "10M tokens"},
 					{Label: "6/8", Value: 30, ValueLabel: "30M tokens"},
-					{Label: "6/9", Value: 20, ValueLabel: "20M tokens"},
 				},
 				Note: strPtr("Estimated from logs."),
 			},
 		},
 	}
 	cards := renderSnapshotCards(snap)
-	if len(cards) != 2 {
-		t.Fatalf("want main + chart cards, got %d: %+v", len(cards), cards)
+	if len(cards) != 1 {
+		t.Fatalf("want spend card only; trend should not render, got %d: %+v", len(cards), cards)
 	}
-	att := cards[1]
-	for _, want := range []string{"Usage Trend", "▃█▆", "Latest 6/9: 20M tokens", "Peak 6/8: 30M tokens", "Estimated from logs."} {
-		haystack := att.Title + "\n" + att.Text
-		if !strings.Contains(haystack, want) {
-			t.Errorf("chart render missing %q: title=%q text=%q", want, att.Title, att.Text)
+	joined := cards[0].Title + "\n" + cards[0].Text
+	for _, bad := range []string{"Usage Trend", "Estimated from logs.", "unsupported line type"} {
+		if strings.Contains(joined, bad) {
+			t.Errorf("barChart leaked %q into render: %q", bad, joined)
 		}
-	}
-	if strings.Contains(att.Text, "unsupported line type") {
-		t.Errorf("chart should not render unsupported marker: %q", att.Text)
 	}
 }
 
@@ -242,12 +238,12 @@ func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
 	}
 	cards := renderSnapshotCards(snap)
 	if len(cards) != 2 {
-		t.Fatalf("want main + model cards, got %d: %+v", len(cards), cards)
+		t.Fatalf("want spend + model cards, got %d: %+v", len(cards), cards)
 	}
 	if strings.Contains(cards[0].Text, "claude-opus") || !strings.Contains(cards[0].Text, "Today") {
-		t.Errorf("main card should keep spend but not model mix: %q", cards[0].Text)
+		t.Errorf("spend card should keep spend but not model mix: %q", cards[0].Text)
 	}
-	if !strings.Contains(cards[1].Title, "Model mix") || !strings.Contains(cards[1].Text, "claude-opus") || !strings.Contains(cards[1].Text, "claude-haiku") {
+	if !strings.Contains(cards[1].Title, "Models") || !strings.Contains(cards[1].Text, "claude-opus") || !strings.Contains(cards[1].Text, "claude-haiku") {
 		t.Errorf("model card wrong: title=%q text=%q", cards[1].Title, cards[1].Text)
 	}
 }

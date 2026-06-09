@@ -38,31 +38,21 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 }
 
 func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
-	main, charts, modelMix := splitSnapshotLines(snap)
+	main, _, modelMix := splitSnapshotLines(snap)
 	cards := []*model.SlackAttachment{renderSnapshot(snap)}
 
 	if len(main.progress) > 0 && len(main.textual) > 0 {
 		cards = append(cards, &model.SlackAttachment{
 			Title:  "💵 " + displayName(snap) + " · Spend",
-			Text:   textualSection(main.textual),
+			Text:   compactTextualSection(main.textual),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
 		})
 	}
-	for _, chart := range charts {
-		if s := chartSection(chart); s != "" {
-			cards = append(cards, &model.SlackAttachment{
-				Title:  "📈 " + displayName(snap) + " · " + emptyAs(chart.Label, "Trend"),
-				Text:   s,
-				Color:  colorAccent,
-				Footer: snapshotFooter(snap),
-			})
-		}
-	}
 	if len(modelMix) > 0 {
 		cards = append(cards, &model.SlackAttachment{
-			Title:  "🧠 " + displayName(snap) + " · Model mix",
-			Text:   textualSection(modelMix),
+			Title:  "🧠 " + displayName(snap) + " · Models",
+			Text:   compactTextualSection(modelMix),
 			Color:  colorAccent,
 			Footer: snapshotFooter(snap),
 		})
@@ -197,70 +187,20 @@ func textualSection(lines []metricLine) string {
 	return strings.Join(rows, "\n")
 }
 
-func chartSection(line metricLine) string {
-	if len(line.Points) == 0 {
+func compactTextualSection(lines []metricLine) string {
+	if len(lines) == 0 {
 		return ""
 	}
-	spark := sparkline(line.Points)
-	latest := line.Points[len(line.Points)-1]
-	peak := line.Points[0]
-	for _, p := range line.Points[1:] {
-		if p.Value > peak.Value {
-			peak = p
+	rows := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch line.Type {
+		case lineText:
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**  "+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
+		case lineBadge:
+			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**  "+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
 		}
-	}
-
-	rows := []string{
-		spark,
-		"Latest " + pointLabel(latest) + " · Peak " + pointLabel(peak),
-	}
-	if note := strings.TrimSpace(derefString(line.Note)); note != "" {
-		rows = append(rows, "_"+note+"_")
 	}
 	return strings.Join(rows, "\n")
-}
-
-func sparkline(points []chartPoint) string {
-	maxValue := 0.0
-	for _, p := range points {
-		if p.Value > maxValue {
-			maxValue = p.Value
-		}
-	}
-	var b strings.Builder
-	for _, p := range points {
-		b.WriteRune(sparkRune(p.Value, maxValue))
-	}
-	return b.String()
-}
-
-func sparkRune(value, maxValue float64) rune {
-	if maxValue <= 0 {
-		return '▁'
-	}
-	idx := int(math.Round(value / maxValue * 7))
-	if idx < 0 {
-		idx = 0
-	}
-	if idx > 7 {
-		idx = 7
-	}
-	return []rune("▁▂▃▄▅▆▇█")[idx]
-}
-
-func pointLabel(p chartPoint) string {
-	label := strings.TrimSpace(p.Label)
-	value := strings.TrimSpace(p.ValueLabel)
-	switch {
-	case label != "" && value != "":
-		return label + ": " + value
-	case label != "":
-		return label + ": " + trimFloat(p.Value)
-	case value != "":
-		return value
-	default:
-		return trimFloat(p.Value)
-	}
 }
 
 // progressValue is the right-hand readout for a progress line, formatted by kind.
