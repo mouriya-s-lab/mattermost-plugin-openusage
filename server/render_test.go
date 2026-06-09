@@ -243,6 +243,26 @@ func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
 	}
 }
 
+func TestModelsFieldAggregatesTail(t *testing.T) {
+	lines := []metricLine{
+		{Type: lineText, Label: "claude-opus-4-7", Value: "73.4%"},
+		{Type: lineText, Label: "claude-opus-4-8", Value: "19.5%"},
+		{Type: lineText, Label: "claude-opus-4-6", Value: "5.8%"},
+		{Type: lineText, Label: "claude-haiku-4-5", Value: "0.5%"},
+		{Type: lineText, Label: "gpt-5.5", Value: "0.4%"},
+		{Type: lineText, Label: "claude-sonnet", Value: "<0.1%"},
+	}
+	got := modelsFieldValue(lines)
+	for _, want := range []string{"opus-4-7 73.4%", "opus-4-8 19.5%", "opus-4-6 5.8%", "Other 1%"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("models field missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "haiku") || strings.Contains(got, "sonnet") {
+		t.Errorf("tail model leaked instead of aggregating: %q", got)
+	}
+}
+
 func fieldValue(f *model.SlackAttachmentField) string {
 	if f == nil || f.Value == nil {
 		return ""

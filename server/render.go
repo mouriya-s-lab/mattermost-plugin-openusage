@@ -17,6 +17,8 @@ const (
 	colorError   = "#C53030"
 
 	barWidth = 10
+
+	modelPrimaryCount = 3
 )
 
 // renderSnapshots renders one card per provider, in the order returned by the
@@ -85,11 +87,7 @@ func limitFieldValue(lines []metricLine) string {
 	}
 	parts := make([]string, 0, len(lines))
 	for _, line := range lines {
-		value := progressValue(line)
-		if reset := shortReset(line.ResetsAt); reset != "" {
-			value += " / " + reset
-		}
-		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+value)
+		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+progressValue(line))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -112,14 +110,70 @@ func modelsFieldValue(lines []metricLine) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, len(lines))
+	items := make([]modelShare, 0, len(lines))
 	for _, line := range lines {
 		if line.Type != lineText && line.Type != lineBadge {
 			continue
 		}
-		parts = append(parts, compactModelLabel(line.Label)+" "+lineDisplayValue(line))
+		items = append(items, modelShare{
+			Label: compactModelLabel(line.Label),
+			Value: lineDisplayValue(line),
+		})
+	}
+	return renderModelShares(items)
+}
+
+type modelShare struct {
+	Label string
+	Value string
+}
+
+func renderModelShares(items []modelShare) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) <= modelPrimaryCount {
+		return joinModelShares(items)
+	}
+	primary := append([]modelShare(nil), items[:modelPrimaryCount]...)
+	if other := otherModelShare(items[modelPrimaryCount:]); other.Value != "" {
+		primary = append(primary, other)
+	}
+	return joinModelShares(primary)
+}
+
+func joinModelShares(items []modelShare) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, item.Label+" "+item.Value)
 	}
 	return strings.Join(parts, " · ")
+}
+
+func otherModelShare(items []modelShare) modelShare {
+	total := 0.0
+	for _, item := range items {
+		total += parsePercentValue(item.Value)
+	}
+	return modelShare{Label: "Other", Value: formatPercentValue(total)}
+}
+
+func parsePercentValue(value string) float64 {
+	v := strings.TrimSpace(value)
+	v = strings.TrimPrefix(v, "<")
+	v = strings.TrimSuffix(v, "%")
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		panic(fmt.Sprintf("invalid model percentage %q", value))
+	}
+	return f
+}
+
+func formatPercentValue(value float64) string {
+	if value < 0.1 {
+		return "<0.1%"
+	}
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", value), "0"), ".") + "%"
 }
 
 type mainSnapshotLines struct {
@@ -259,7 +313,6 @@ func compactMetricLabel(label string) string {
 func compactModelLabel(label string) string {
 	label = strings.TrimSpace(label)
 	label = strings.TrimPrefix(label, "claude-")
-	label = strings.TrimPrefix(label, "gpt-")
 	return emptyAs(label, "—")
 }
 
