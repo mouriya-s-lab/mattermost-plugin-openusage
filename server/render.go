@@ -38,50 +38,7 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 }
 
 func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
-	main, _, modelMix := splitSnapshotLines(snap)
-	cards := make([]*model.SlackAttachment, 0, len(main.progress)+2)
-
-	for _, line := range main.progress {
-		cards = append(cards, renderProgressCard(snap, line))
-	}
-	if len(main.textual) > 0 {
-		cards = append(cards, &model.SlackAttachment{
-			Title:  displayName(snap) + " · Spend",
-			Text:   inlineTextualSection(main.textual),
-			Color:  colorAccent,
-			Footer: snapshotFooter(snap),
-		})
-	}
-	if len(modelMix) > 0 {
-		cards = append(cards, &model.SlackAttachment{
-			Title:  displayName(snap) + " · Models",
-			Text:   inlineTextualSection(modelMix),
-			Color:  colorAccent,
-			Footer: snapshotFooter(snap),
-		})
-	}
-	if len(cards) == 0 {
-		cards = append(cards, renderSnapshot(snap))
-	}
-	return cards
-}
-
-func renderProgressCard(snap providerSnapshot, line metricLine) *model.SlackAttachment {
-	label := emptyAs(strings.TrimSpace(line.Label), "—")
-	value := progressValue(line)
-	if reset := relativeReset(line.ResetsAt); reset != "" {
-		value += " · " + reset
-	}
-	title := displayName(snap) + " · " + label
-	if plan := strings.TrimSpace(derefString(snap.Plan)); plan != "" {
-		title += " · " + plan
-	}
-	return &model.SlackAttachment{
-		Title:  title,
-		Text:   value + "  \n" + usageBar(lineUsedPercent(line)),
-		Color:  progressColor(line),
-		Footer: snapshotFooter(snap),
-	}
+	return []*model.SlackAttachment{renderSnapshot(snap)}
 }
 
 // renderSnapshot builds one provider card. Everything lives in attachment Text
@@ -95,22 +52,47 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 		title += "  ·  " + plan
 	}
 
-	main, _, _ := splitSnapshotLines(snap)
+	main, _, modelMix := splitSnapshotLines(snap)
 
 	att := &model.SlackAttachment{
 		Title:  title,
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	if len(main.progress) > 0 {
-		att.Text = snapshotText(main.progress, nil)
-	} else {
-		att.Text = snapshotText(nil, main.textual)
-	}
+	att.Text = providerSummaryText(main.progress, main.textual, modelMix)
 	if att.Text == "" {
 		att.Text = "_No usage lines returned._"
 	}
 	return att
+}
+
+func providerSummaryText(progress, spend, models []metricLine) string {
+	sections := make([]string, 0, 3)
+	if s := inlineProgressSection(progress); s != "" {
+		sections = append(sections, "**Limits** — "+s)
+	}
+	if s := inlineTextualSection(spend); s != "" {
+		sections = append(sections, "**Spend** — "+s)
+	}
+	if s := inlineTextualSection(models); s != "" {
+		sections = append(sections, "**Models** — "+s)
+	}
+	return strings.Join(sections, "  \n")
+}
+
+func inlineProgressSection(lines []metricLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		value := progressValue(line)
+		if reset := shortReset(line.ResetsAt); reset != "" {
+			value += " / " + reset
+		}
+		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+value+" "+usageBar(lineUsedPercent(line)))
+	}
+	return strings.Join(parts, " · ")
 }
 
 type mainSnapshotLines struct {
@@ -231,12 +213,36 @@ func inlineTextualSection(lines []metricLine) string {
 	for _, line := range lines {
 		switch line.Type {
 		case lineText:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"** — "+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
+			rows = append(rows, emptyAs(line.Label, "—")+" "+plainWithSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
 		case lineBadge:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"** — "+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
+			rows = append(rows, emptyAs(line.Label, "—")+" "+plainWithSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
 		}
 	}
-	return strings.Join(rows, "  \n")
+	return strings.Join(rows, " · ")
+}
+
+func shortReset(resetsAt *string) string {
+	value := strings.TrimSpace(derefString(resetsAt))
+	if value == "" {
+		return ""
+	}
+	t, ok := parseISO(value)
+	if !ok {
+		return "reset " + value
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "reset now"
+	}
+	return "reset " + humanizeDuration(d)
+}
+
+func plainWithSubtitle(value string, subtitle *string) string {
+	sub := strings.TrimSpace(derefString(subtitle))
+	if sub == "" {
+		return value
+	}
+	return value + " (" + sub + ")"
 }
 
 // progressValue is the right-hand readout for a progress line, formatted by kind.

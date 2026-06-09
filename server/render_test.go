@@ -40,8 +40,8 @@ func TestParseSnapshotDocSample(t *testing.T) {
 func TestRenderSnapshotDocSample(t *testing.T) {
 	snap, _ := parseSnapshot([]byte(docSample))
 	cards := renderSnapshotCards(snap)
-	if len(cards) != 2 {
-		t.Fatalf("want limits + spend cards, got %d: %+v", len(cards), cards)
+	if len(cards) != 1 {
+		t.Fatalf("want one provider card, got %d: %+v", len(cards), cards)
 	}
 	att := cards[0]
 
@@ -59,11 +59,11 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.Contains(att.Text, "42%") {
 		t.Errorf("text missing 42%%: %q", att.Text)
 	}
-	if !strings.Contains(att.Title, "Session") {
-		t.Errorf("title missing label: %q", att.Title)
+	if !strings.Contains(att.Text, "Session") {
+		t.Errorf("text missing label: %q", att.Text)
 	}
-	if strings.Contains(att.Text, "Today") || !strings.Contains(cards[1].Text, "Today") || !strings.Contains(cards[1].Text, "$5.17") {
-		t.Errorf("spend split wrong: main=%q spend=%q", att.Text, cards[1].Text)
+	if !strings.Contains(att.Text, "Spend") || !strings.Contains(att.Text, "Today $5.17") {
+		t.Errorf("spend missing from provider card: %q", att.Text)
 	}
 	if att.Color != colorGood {
 		t.Errorf("color = %q, want good", att.Color)
@@ -213,7 +213,7 @@ func TestBarChartIsIgnored(t *testing.T) {
 	}
 	cards := renderSnapshotCards(snap)
 	if len(cards) != 1 {
-		t.Fatalf("want spend card only; trend should not render, got %d: %+v", len(cards), cards)
+		t.Fatalf("want one provider card; trend should not render, got %d: %+v", len(cards), cards)
 	}
 	joined := cards[0].Title + "\n" + cards[0].Text
 	for _, bad := range []string{"Usage Trend", "Estimated from logs.", "unsupported line type"} {
@@ -234,14 +234,14 @@ func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
 		},
 	}
 	cards := renderSnapshotCards(snap)
-	if len(cards) != 2 {
-		t.Fatalf("want spend + model cards, got %d: %+v", len(cards), cards)
+	if len(cards) != 1 {
+		t.Fatalf("want one provider card, got %d: %+v", len(cards), cards)
 	}
-	if strings.Contains(cards[0].Text, "claude-opus") || !strings.Contains(cards[0].Text, "Today") {
-		t.Errorf("spend card should keep spend but not model mix: %q", cards[0].Text)
+	if !strings.Contains(cards[0].Text, "Spend") || !strings.Contains(cards[0].Text, "Today $1.23") {
+		t.Errorf("provider card missing spend: %q", cards[0].Text)
 	}
-	if !strings.Contains(cards[1].Title, "Models") || !strings.Contains(cards[1].Text, "claude-opus") || !strings.Contains(cards[1].Text, "claude-haiku") {
-		t.Errorf("model card wrong: title=%q text=%q", cards[1].Title, cards[1].Text)
+	if !strings.Contains(cards[0].Text, "Models") || !strings.Contains(cards[0].Text, "claude-opus 99.9%") || !strings.Contains(cards[0].Text, "claude-haiku <0.1%") {
+		t.Errorf("provider card missing models: %q", cards[0].Text)
 	}
 }
 
