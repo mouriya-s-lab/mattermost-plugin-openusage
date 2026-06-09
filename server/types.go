@@ -21,7 +21,6 @@ const (
 	lineText     lineKind = "text"
 	lineProgress lineKind = "progress"
 	lineBadge    lineKind = "badge"
-	lineBarChart lineKind = "barChart"
 )
 
 type formatKind string
@@ -48,13 +47,7 @@ type lineFormat struct {
 	Suffix string     `json:"suffix,omitempty"`
 }
 
-type chartPoint struct {
-	Label      string  `json:"label"`
-	Value      float64 `json:"value"`
-	ValueLabel string  `json:"valueLabel"`
-}
-
-// metricLine is the decoded superset of all line variants. The Type field
+// metricLine is the decoded superset of all three line variants. The Type field
 // is the discriminator; only the fields belonging to that variant are populated.
 type metricLine struct {
 	Type  lineKind `json:"type"`
@@ -76,10 +69,6 @@ type metricLine struct {
 	Format           *lineFormat `json:"format"`
 	ResetsAt         *string     `json:"resetsAt"`
 	PeriodDurationMs *int64      `json:"periodDurationMs"`
-
-	// barChart
-	Points []chartPoint `json:"points"`
-	Note   *string      `json:"note"`
 }
 
 // parseSnapshots decodes the GET /v1/usage array body.

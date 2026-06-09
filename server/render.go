@@ -16,9 +16,7 @@ const (
 	colorWarning = "#B7791F"
 	colorError   = "#C53030"
 
-	barWidth = 10
-
-	modelPrimaryCount = 3
+	barWidth = 12
 )
 
 // renderSnapshots renders one card per provider, in the order returned by the
@@ -34,310 +32,91 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 	}
 	out := make([]*model.SlackAttachment, 0, len(snaps))
 	for _, snap := range snaps {
-		out = append(out, renderSnapshotCards(snap)...)
+		out = append(out, renderSnapshot(snap))
 	}
 	return out
 }
 
-func renderSnapshotCards(snap providerSnapshot) []*model.SlackAttachment {
-	return []*model.SlackAttachment{renderSnapshot(snap)}
-}
-
-// renderSnapshot builds one provider card. Everything lives in attachment Text
-// instead of Mattermost "short" fields or fenced code blocks: production showed
-// those render paths clip columns and mangle block glyphs in narrow browser
-// cards. Plain markdown lines wrap naturally and keep every OpenUsage line
-// visible.
+// renderSnapshot builds one provider card. Progress limits render as aligned
+// Unicode bars in a monospace block (mirroring the OpenUsage menubar); text and
+// badge lines render as a compact two-column field grid below.
 func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 	title := statusDot(snap) + " " + displayName(snap)
 	if plan := strings.TrimSpace(derefString(snap.Plan)); plan != "" {
 		title += "  ·  " + plan
 	}
 
-	main, _, modelMix := splitSnapshotLines(snap)
+	var progress, textual []metricLine
+	for _, line := range snap.Lines {
+		switch line.Type {
+		case lineProgress:
+			progress = append(progress, line)
+		default:
+			textual = append(textual, line)
+		}
+	}
+
 	att := &model.SlackAttachment{
 		Title:  title,
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	att.Fields = providerFields(main.progress, main.textual, modelMix)
-	if len(att.Fields) == 0 {
+	att.Text = progressBlock(progress)
+	att.Fields = textualFields(textual)
+	if att.Text == "" && len(att.Fields) == 0 {
 		att.Text = "_No usage lines returned._"
 	}
 	return att
 }
 
-func providerFields(progress, spend, models []metricLine) []*model.SlackAttachmentField {
-	fields := make([]*model.SlackAttachmentField, 0, 3)
-	if s := limitFieldValue(progress); s != "" {
-		fields = append(fields, fullField("Limits", s))
-	}
-	if s := spendFieldValue(spend); s != "" {
-		fields = append(fields, fullField("Spend", s))
-	}
-	if s := modelsFieldValue(models); s != "" {
-		fields = append(fields, fullField("Models", s))
-	}
-	return fields
-}
-
-func limitFieldValue(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(lines))
-	for _, line := range lines {
-		parts = append(parts, emptyAs(strings.TrimSpace(line.Label), "—")+" "+progressValue(line))
-	}
-	return strings.Join(parts, " · ")
-}
-
-func spendFieldValue(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if line.Type != lineText && line.Type != lineBadge {
-			continue
-		}
-		parts = append(parts, compactMetricLabel(line.Label)+" "+lineDisplayValue(line))
-	}
-	return strings.Join(parts, " · ")
-}
-
-func modelsFieldValue(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	items := make([]modelShare, 0, len(lines))
-	for _, line := range lines {
-		if line.Type != lineText && line.Type != lineBadge {
-			continue
-		}
-		items = append(items, modelShare{
-			Label: compactModelLabel(line.Label),
-			Value: lineDisplayValue(line),
-		})
-	}
-	return renderModelShares(items)
-}
-
-type modelShare struct {
-	Label string
-	Value string
-}
-
-func renderModelShares(items []modelShare) string {
-	if len(items) == 0 {
-		return ""
-	}
-	if len(items) <= modelPrimaryCount {
-		return joinModelShares(items)
-	}
-	primary := append([]modelShare(nil), items[:modelPrimaryCount]...)
-	if other := otherModelShare(items[modelPrimaryCount:]); other.Value != "" {
-		primary = append(primary, other)
-	}
-	return joinModelShares(primary)
-}
-
-func joinModelShares(items []modelShare) string {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		parts = append(parts, item.Label+" "+item.Value)
-	}
-	return strings.Join(parts, " · ")
-}
-
-func otherModelShare(items []modelShare) modelShare {
-	total := 0.0
-	for _, item := range items {
-		total += parsePercentValue(item.Value)
-	}
-	return modelShare{Label: "Other", Value: formatPercentValue(total)}
-}
-
-func parsePercentValue(value string) float64 {
-	v := strings.TrimSpace(value)
-	v = strings.TrimPrefix(v, "<")
-	v = strings.TrimSuffix(v, "%")
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		panic(fmt.Sprintf("invalid model percentage %q", value))
-	}
-	return f
-}
-
-func formatPercentValue(value float64) string {
-	if value < 0.1 {
-		return "<0.1%"
-	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", value), "0"), ".") + "%"
-}
-
-type mainSnapshotLines struct {
-	progress []metricLine
-	textual  []metricLine
-}
-
-func splitSnapshotLines(snap providerSnapshot) (mainSnapshotLines, []metricLine, []metricLine) {
-	var main mainSnapshotLines
-	var charts, modelMix []metricLine
-	for _, line := range snap.Lines {
-		switch line.Type {
-		case lineProgress:
-			main.progress = append(main.progress, line)
-		case lineBarChart:
-			charts = append(charts, line)
-		case lineText:
-			if isPercentValue(line.Value) {
-				modelMix = append(modelMix, line)
-			} else {
-				main.textual = append(main.textual, line)
-			}
-		default:
-			main.textual = append(main.textual, line)
-		}
-	}
-	return main, charts, modelMix
-}
-
-func isPercentValue(value string) bool {
-	v := strings.TrimSpace(value)
-	return strings.HasSuffix(v, "%")
-}
-
-func snapshotText(progress, textual []metricLine) string {
-	var sections []string
-	if s := progressSection(progress); s != "" {
-		sections = append(sections, "**Limits**\n"+s)
-	}
-	if s := textualSection(textual); s != "" {
-		sections = append(sections, "**Details**\n"+s)
-	}
-	return strings.Join(sections, "\n\n")
-}
-
-// progressSection renders each limit as a single markdown bullet. Keeping the
-// reset in the same bullet avoids the production clipping caused by the old
-// fenced monospace table's continuation rows.
-func progressSection(lines []metricLine) string {
+// progressBlock renders the progress lines as an aligned monospace table. The
+// bar row is `label  bar  value`; when a line has a reset window it goes on its
+// own indented line *below* the bar (`↳ resets in …`) so the bar row stays
+// narrow and the reset is visible without expanding the card.
+func progressBlock(lines []metricLine) string {
 	if len(lines) == 0 {
 		return ""
 	}
 
-	rows := make([]string, 0, len(lines))
+	type row struct{ label, bar, value, reset string }
+	rows := make([]row, 0, len(lines))
+	labelW := 0
 	for _, line := range lines {
-		value := progressValue(line)
-		if reset := relativeReset(line.ResetsAt); reset != "" {
-			value += " · " + reset
+		r := row{
+			label: emptyAs(strings.TrimSpace(line.Label), "—"),
+			bar:   usageBar(lineUsedPercent(line)),
+			value: progressValue(line),
+			reset: relativeReset(line.ResetsAt),
 		}
-		rows = append(rows, "**"+emptyAs(strings.TrimSpace(line.Label), "—")+"**\n"+value+"\n"+usageBar(lineUsedPercent(line)))
+		labelW = max(labelW, len([]rune(r.label)))
+		rows = append(rows, r)
 	}
-	return strings.Join(rows, "\n\n")
+
+	// Reset lines indent to the bar's start column so they read as a caption.
+	indent := strings.Repeat(" ", labelW+2)
+	var b strings.Builder
+	b.WriteString("```\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%s  %s  %s\n", padRune(r.label, labelW), r.bar, r.value)
+		if r.reset != "" {
+			b.WriteString(indent + "↳ " + r.reset + "\n")
+		}
+	}
+	b.WriteString("```")
+	return b.String()
 }
 
-// usageBar draws a fixed-width inline bar from a 0..100 percentage. NaN renders
-// empty. Simple geometric squares render reliably in Mattermost proportional
-// text; the old block characters inside a code fence rendered as clipped columns in
-// production.
+// usageBar draws a fixed-width bar from a 0..100 percentage. NaN renders empty.
 func usageBar(pct float64) string {
 	if math.IsNaN(pct) {
-		return strings.Repeat("□", barWidth)
+		return strings.Repeat("░", barWidth)
 	}
 	pct = math.Max(0, math.Min(100, pct))
 	filled := int(math.Round(pct / 100 * barWidth))
 	if filled > barWidth {
 		filled = barWidth
 	}
-	return strings.Repeat("■", filled) + strings.Repeat("□", barWidth-filled)
-}
-
-func textualSection(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	rows := make([]string, 0, len(lines))
-	for _, line := range lines {
-		switch line.Type {
-		case lineText:
-			rows = append(rows, "• **"+emptyAs(line.Label, "—")+"** "+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
-		case lineBadge:
-			rows = append(rows, "• **"+emptyAs(line.Label, "—")+"** "+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
-		}
-	}
-	return strings.Join(rows, "\n")
-}
-
-func compactTextualSection(lines []metricLine) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	rows := make([]string, 0, len(lines))
-	for _, line := range lines {
-		switch line.Type {
-		case lineText:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**\n"+withSubtitle(emptyAs(line.Value, "—"), line.Subtitle))
-		case lineBadge:
-			rows = append(rows, "**"+emptyAs(line.Label, "—")+"**\n"+withSubtitle(emptyAs(line.Text, "—"), line.Subtitle))
-		}
-	}
-	return strings.Join(rows, "\n\n")
-}
-
-func fullField(title, value string) *model.SlackAttachmentField {
-	return &model.SlackAttachmentField{Title: title, Value: value, Short: false}
-}
-
-func lineDisplayValue(line metricLine) string {
-	switch line.Type {
-	case lineText:
-		return plainWithSubtitle(emptyAs(line.Value, "—"), line.Subtitle)
-	case lineBadge:
-		return plainWithSubtitle(emptyAs(line.Text, "—"), line.Subtitle)
-	default:
-		return "—"
-	}
-}
-
-func compactMetricLabel(label string) string {
-	switch strings.TrimSpace(label) {
-	case "Last 30 Days":
-		return "30d"
-	default:
-		return emptyAs(label, "—")
-	}
-}
-
-func compactModelLabel(label string) string {
-	label = strings.TrimSpace(label)
-	label = strings.TrimPrefix(label, "claude-")
-	return emptyAs(label, "—")
-}
-
-func shortReset(resetsAt *string) string {
-	value := strings.TrimSpace(derefString(resetsAt))
-	if value == "" {
-		return ""
-	}
-	t, ok := parseISO(value)
-	if !ok {
-		return "reset " + value
-	}
-	d := time.Until(t)
-	if d <= 0 {
-		return "reset now"
-	}
-	return "reset " + humanizeDuration(d)
-}
-
-func plainWithSubtitle(value string, subtitle *string) string {
-	sub := strings.TrimSpace(derefString(subtitle))
-	if sub == "" {
-		return value
-	}
-	return value + " (" + sub + ")"
+	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 }
 
 // progressValue is the right-hand readout for a progress line, formatted by kind.
@@ -376,6 +155,27 @@ func progressValue(line metricLine) string {
 		}
 		return fmt.Sprintf("%d%%", int(math.Round(pct)))
 	}
+}
+
+// textualFields renders text/badge lines as a two-column field grid.
+func textualFields(lines []metricLine) []*model.SlackAttachmentField {
+	if len(lines) == 0 {
+		return nil
+	}
+	fields := make([]*model.SlackAttachmentField, 0, len(lines))
+	for _, line := range lines {
+		var value string
+		switch line.Type {
+		case lineText:
+			value = emptyAs(line.Value, "—")
+		case lineBadge:
+			value = emptyAs(line.Text, "—")
+		default:
+			value = "unsupported line type \"" + string(line.Type) + "\""
+		}
+		fields = append(fields, shortField(emptyAs(line.Label, "—"), withSubtitle(value, line.Subtitle)))
+	}
+	return fields
 }
 
 // relativeReset turns an ISO reset timestamp into "resets in 2h" / "resets in
@@ -468,21 +268,6 @@ func snapshotColor(snap providerSnapshot) string {
 	}
 }
 
-func progressColor(line metricLine) string {
-	pct := lineUsedPercent(line)
-	if math.IsNaN(pct) {
-		return colorAccent
-	}
-	switch {
-	case pct >= 90:
-		return colorError
-	case pct >= 70:
-		return colorWarning
-	default:
-		return colorGood
-	}
-}
-
 // lineUsedPercent returns the used percentage for a progress line, or NaN when
 // it cannot be computed.
 func lineUsedPercent(line metricLine) float64 {
@@ -550,12 +335,26 @@ func parseISO(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// padRune right-pads s with spaces to w display runes (rune-aware so multibyte
+// labels still align in the monospace block).
+func padRune(s string, w int) string {
+	n := len([]rune(s))
+	if n >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-n)
+}
+
 func withSubtitle(value string, subtitle *string) string {
 	sub := strings.TrimSpace(derefString(subtitle))
 	if sub == "" {
 		return value
 	}
 	return value + "\n_" + sub + "_"
+}
+
+func shortField(title, value string) *model.SlackAttachmentField {
+	return &model.SlackAttachmentField{Title: title, Value: value, Short: true}
 }
 
 func emptyAs(value, fallback string) string {

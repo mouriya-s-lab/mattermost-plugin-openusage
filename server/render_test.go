@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mattermost/mattermost/server/public/model"
 )
 
 // docSample is the exact response shape from docs/local-http-api.md.
@@ -41,26 +39,30 @@ func TestParseSnapshotDocSample(t *testing.T) {
 
 func TestRenderSnapshotDocSample(t *testing.T) {
 	snap, _ := parseSnapshot([]byte(docSample))
-	cards := renderSnapshotCards(snap)
-	if len(cards) != 1 {
-		t.Fatalf("want one provider card, got %d: %+v", len(cards), cards)
-	}
-	att := cards[0]
+	att := renderSnapshot(snap)
 
 	if !strings.Contains(att.Title, "Claude") || !strings.Contains(att.Title, "Team 5x") {
 		t.Errorf("title = %q", att.Title)
 	}
-	if att.Text != "" {
-		t.Errorf("provider card should use fields, not text wall: %q", att.Text)
+	if !strings.HasPrefix(att.Title, "🟢") { // 42% -> good
+		t.Errorf("title should lead with green dot: %q", att.Title)
 	}
-	if len(att.Fields) != 2 {
-		t.Fatalf("want Limits + Spend fields, got %+v", att.Fields)
+	// Progress bar lives in the monospace Text block.
+	if !strings.Contains(att.Text, "```") || !strings.Contains(att.Text, "█") {
+		t.Errorf("text missing bar block: %q", att.Text)
 	}
-	if att.Fields[0].Title != "Limits" || !strings.Contains(fieldValue(att.Fields[0]), "Session 42%") {
-		t.Errorf("limits field wrong: %+v", att.Fields[0])
+	if !strings.Contains(att.Text, "42%") {
+		t.Errorf("text missing 42%%: %q", att.Text)
 	}
-	if att.Fields[1].Title != "Spend" || !strings.Contains(fieldValue(att.Fields[1]), "Today $5.17") {
-		t.Errorf("spend field wrong: %+v", att.Fields[1])
+	if !strings.Contains(att.Text, "Session") {
+		t.Errorf("text missing label: %q", att.Text)
+	}
+	// Text line becomes a field.
+	if len(att.Fields) != 1 || att.Fields[0].Title != "Today" {
+		t.Fatalf("fields = %+v", att.Fields)
+	}
+	if v, _ := att.Fields[0].Value.(string); !strings.Contains(v, "$5.17") {
+		t.Errorf("today field = %q", v)
 	}
 	if att.Color != colorGood {
 		t.Errorf("color = %q, want good", att.Color)
@@ -72,11 +74,11 @@ func TestUsageBar(t *testing.T) {
 		pct        float64
 		wantFilled int
 	}{
-		{0, 0}, {100, barWidth}, {50, barWidth / 2}, {42, 4}, {200, barWidth}, {-5, 0},
+		{0, 0}, {100, barWidth}, {50, barWidth / 2}, {42, 5}, {200, barWidth}, {-5, 0},
 	}
 	for _, tt := range tests {
 		bar := usageBar(tt.pct)
-		if got := strings.Count(bar, "■"); got != tt.wantFilled {
+		if got := strings.Count(bar, "█"); got != tt.wantFilled {
 			t.Errorf("usageBar(%v) filled=%d, want %d (bar=%q)", tt.pct, got, tt.wantFilled, bar)
 		}
 		if total := len([]rune(bar)); total != barWidth {
@@ -139,7 +141,7 @@ func TestRenderSnapshotsEmpty(t *testing.T) {
 	}
 }
 
-func TestBadgeAndSubtitleText(t *testing.T) {
+func TestBadgeAndSubtitleField(t *testing.T) {
 	sub := "Last sync 5m ago"
 	snap := providerSnapshot{
 		ProviderID:  "x",
@@ -150,132 +152,54 @@ func TestBadgeAndSubtitleText(t *testing.T) {
 	if len(att.Fields) != 1 {
 		t.Fatalf("fields = %+v", att.Fields)
 	}
-	if !strings.Contains(fieldValue(att.Fields[0]), "Connected") || !strings.Contains(fieldValue(att.Fields[0]), "Last sync 5m ago") {
-		t.Errorf("badge field = %+v", att.Fields[0])
+	v, _ := att.Fields[0].Value.(string)
+	if !strings.Contains(v, "Connected") || !strings.Contains(v, "Last sync 5m ago") {
+		t.Errorf("badge field = %q", v)
 	}
 }
 
-func TestProgressSectionRendersInlineRows(t *testing.T) {
+func TestProgressBlockAligns(t *testing.T) {
 	mk := func(label string, used float64) metricLine {
 		u, l := used, 100.0
 		return metricLine{Type: lineProgress, Label: label, Used: &u, Limit: &l, Format: &lineFormat{Kind: formatPercent}}
 	}
-	block := progressSection([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
-	sections := strings.Split(block, "\n\n")
-	if len(sections) != 2 {
-		t.Fatalf("want 2 separated limit sections, got %d: %q", len(sections), block)
+	block := progressBlock([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
+	lines := strings.Split(strings.Trim(block, "`\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 rows, got %d: %q", len(lines), block)
 	}
-	for _, want := range []string{"**Session**", "20%", "**Spark Weekly**", "0%"} {
-		if !strings.Contains(block, want) {
-			t.Errorf("progress section missing %q: %q", want, block)
-		}
-	}
-	if strings.Contains(block, "```") {
-		t.Errorf("progress section should not use code fences: %q", block)
+	// Bars start at the same column => labels padded to equal width.
+	c0 := strings.Index(lines[0], "█")
+	c1 := strings.Index(lines[1], "░")
+	if c0 != c1 {
+		t.Errorf("bars not aligned: %d vs %d\n%s", c0, c1, block)
 	}
 }
 
-func TestProgressResetInline(t *testing.T) {
+// TestProgressResetBelowBar asserts the reset window is on its own line below
+// the bar (not trailing the bar row), indented under the bar's start column.
+func TestProgressResetBelowBar(t *testing.T) {
 	u, l := 42.0, 100.0
 	reset := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 	line := metricLine{
 		Type: lineProgress, Label: "Session", Used: &u, Limit: &l,
 		Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
 	}
-	block := progressSection([]metricLine{line})
-	if strings.Count(block, "\n") != 2 {
-		t.Fatalf("single progress line should render as label/value/bar lines: %q", block)
+	block := progressBlock([]metricLine{line})
+	rows := strings.Split(strings.Trim(block, "`\n"), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("want bar row + reset row, got %d: %q", len(rows), block)
 	}
-	if !strings.Contains(block, "■") || !strings.Contains(block, "42%") || !strings.Contains(block, "resets in 2h") {
-		t.Errorf("progress row missing data: %q", block)
+	if !strings.Contains(rows[0], "█") || strings.Contains(rows[0], "resets") {
+		t.Errorf("bar row should hold the bar and no reset text: %q", rows[0])
 	}
-}
-
-func TestBarChartIsIgnored(t *testing.T) {
-	snap := providerSnapshot{
-		ProviderID:  "codex",
-		DisplayName: "Codex",
-		Lines: []metricLine{
-			{Type: lineText, Label: "Today", Value: "$1.23 · 1M tokens"},
-			{
-				Type:  lineBarChart,
-				Label: "Usage Trend",
-				Points: []chartPoint{
-					{Label: "6/7", Value: 10, ValueLabel: "10M tokens"},
-					{Label: "6/8", Value: 30, ValueLabel: "30M tokens"},
-				},
-				Note: strPtr("Estimated from logs."),
-			},
-		},
+	if !strings.Contains(rows[1], "resets in 2h") {
+		t.Errorf("reset row missing reset window: %q", rows[1])
 	}
-	cards := renderSnapshotCards(snap)
-	if len(cards) != 1 {
-		t.Fatalf("want one provider card; trend should not render, got %d: %+v", len(cards), cards)
-	}
-	joined := cards[0].Title + "\n" + fieldsText(cards[0].Fields)
-	for _, bad := range []string{"Usage Trend", "Estimated from logs.", "unsupported line type"} {
-		if strings.Contains(joined, bad) {
-			t.Errorf("barChart leaked %q into render: %q", bad, joined)
-		}
+	// Reset row indents past the label so it sits under the bar.
+	barCol := strings.Index(rows[0], "█")
+	resetCol := strings.IndexFunc(rows[1], func(r rune) bool { return r != ' ' })
+	if resetCol < barCol {
+		t.Errorf("reset row not indented under bar: resetCol=%d barCol=%d\n%s", resetCol, barCol, block)
 	}
 }
-
-func TestRenderSnapshotCardsSplitsModelMix(t *testing.T) {
-	snap := providerSnapshot{
-		ProviderID:  "claude",
-		DisplayName: "Claude",
-		Lines: []metricLine{
-			{Type: lineText, Label: "Today", Value: "$1.23 · 1M tokens"},
-			{Type: lineText, Label: "claude-opus", Value: "99.9%"},
-			{Type: lineText, Label: "claude-haiku", Value: "<0.1%"},
-		},
-	}
-	cards := renderSnapshotCards(snap)
-	if len(cards) != 1 {
-		t.Fatalf("want one provider card, got %d: %+v", len(cards), cards)
-	}
-	joined := fieldsText(cards[0].Fields)
-	if !strings.Contains(joined, "Spend") || !strings.Contains(joined, "Today $1.23") {
-		t.Errorf("provider card missing spend: %s", joined)
-	}
-	if !strings.Contains(joined, "Models") || !strings.Contains(joined, "opus 99.9%") || !strings.Contains(joined, "haiku <0.1%") {
-		t.Errorf("provider card missing models: %s", joined)
-	}
-}
-
-func TestModelsFieldAggregatesTail(t *testing.T) {
-	lines := []metricLine{
-		{Type: lineText, Label: "claude-opus-4-7", Value: "73.4%"},
-		{Type: lineText, Label: "claude-opus-4-8", Value: "19.5%"},
-		{Type: lineText, Label: "claude-opus-4-6", Value: "5.8%"},
-		{Type: lineText, Label: "claude-haiku-4-5", Value: "0.5%"},
-		{Type: lineText, Label: "gpt-5.5", Value: "0.4%"},
-		{Type: lineText, Label: "claude-sonnet", Value: "<0.1%"},
-	}
-	got := modelsFieldValue(lines)
-	for _, want := range []string{"opus-4-7 73.4%", "opus-4-8 19.5%", "opus-4-6 5.8%", "Other 1%"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("models field missing %q: %q", want, got)
-		}
-	}
-	if strings.Contains(got, "haiku") || strings.Contains(got, "sonnet") {
-		t.Errorf("tail model leaked instead of aggregating: %q", got)
-	}
-}
-
-func fieldValue(f *model.SlackAttachmentField) string {
-	if f == nil || f.Value == nil {
-		return ""
-	}
-	return f.Value.(string)
-}
-
-func fieldsText(fields []*model.SlackAttachmentField) string {
-	parts := make([]string, 0, len(fields))
-	for _, f := range fields {
-		parts = append(parts, f.Title+" "+fieldValue(f))
-	}
-	return strings.Join(parts, "\n")
-}
-
-func strPtr(s string) *string { return &s }
