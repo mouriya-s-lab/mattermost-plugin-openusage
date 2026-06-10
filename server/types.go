@@ -21,6 +21,7 @@ const (
 	lineText     lineKind = "text"
 	lineProgress lineKind = "progress"
 	lineBadge    lineKind = "badge"
+	lineBarChart lineKind = "barChart"
 )
 
 type formatKind string
@@ -69,6 +70,17 @@ type metricLine struct {
 	Format           *lineFormat `json:"format"`
 	ResetsAt         *string     `json:"resetsAt"`
 	PeriodDurationMs *int64      `json:"periodDurationMs"`
+
+	// barChart
+	Points []chartPoint `json:"points"`
+	Note   *string      `json:"note"`
+}
+
+// chartPoint is one bar of a barChart line.
+type chartPoint struct {
+	Label      string  `json:"label"`
+	Value      float64 `json:"value"`
+	ValueLabel string  `json:"valueLabel"`
 }
 
 // parseSnapshots decodes the GET /v1/usage array body.

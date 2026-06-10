@@ -47,15 +47,19 @@ func TestRenderSnapshotDocSample(t *testing.T) {
 	if !strings.HasPrefix(att.Title, "🟢") { // 42% -> good
 		t.Errorf("title should lead with green dot: %q", att.Title)
 	}
-	// Progress bar lives in the monospace Text block.
-	if !strings.Contains(att.Text, "```") || !strings.Contains(att.Text, "█") {
-		t.Errorf("text missing bar block: %q", att.Text)
+	// Progress bars render as inline-code pills, never a fenced block (which
+	// clips horizontally in the Mattermost webapp).
+	if strings.Contains(att.Text, "```") {
+		t.Errorf("text must not use a fenced block: %q", att.Text)
+	}
+	if !strings.Contains(att.Text, "`█") {
+		t.Errorf("text missing inline-code bar: %q", att.Text)
 	}
 	if !strings.Contains(att.Text, "42%") {
 		t.Errorf("text missing 42%%: %q", att.Text)
 	}
-	if !strings.Contains(att.Text, "Session") {
-		t.Errorf("text missing label: %q", att.Text)
+	if !strings.Contains(att.Text, "**Session**") {
+		t.Errorf("text missing bold label: %q", att.Text)
 	}
 	// Text line becomes a field.
 	if len(att.Fields) != 1 || att.Fields[0].Title != "Today" {
@@ -158,48 +162,115 @@ func TestBadgeAndSubtitleField(t *testing.T) {
 	}
 }
 
-func TestProgressBlockAligns(t *testing.T) {
+// TestProgressLinesShape asserts each progress line is one markdown line:
+// inline-code `bar  value` pill, bold label, then the reset window. Percent
+// values pad to a fixed width so pills align across lines.
+func TestProgressLinesShape(t *testing.T) {
 	mk := func(label string, used float64) metricLine {
 		u, l := used, 100.0
-		return metricLine{Type: lineProgress, Label: label, Used: &u, Limit: &l, Format: &lineFormat{Kind: formatPercent}}
+		reset := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+		return metricLine{
+			Type: lineProgress, Label: label, Used: &u, Limit: &l,
+			Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
+		}
 	}
-	block := progressBlock([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
-	lines := strings.Split(strings.Trim(block, "`\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 rows, got %d: %q", len(lines), block)
+	got := progressLines([]metricLine{mk("Session", 20), mk("Spark Weekly", 0)})
+	rows := strings.Split(got, "\n")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d: %q", len(rows), got)
 	}
-	// Bars start at the same column => labels padded to equal width.
-	c0 := strings.Index(lines[0], "█")
-	c1 := strings.Index(lines[1], "░")
-	if c0 != c1 {
-		t.Errorf("bars not aligned: %d vs %d\n%s", c0, c1, block)
+	if rows[0] != "`██░░░░░░░░░░   20%` **Session** · resets in 2h" {
+		t.Errorf("row 0 = %q", rows[0])
+	}
+	if rows[1] != "`░░░░░░░░░░░░    0%` **Spark Weekly** · resets in 2h" {
+		t.Errorf("row 1 = %q", rows[1])
+	}
+	// Pills end at the same rune column: bar width + 2 + padded value.
+	if w0, w1 := strings.Index(rows[0], "` "), strings.Index(rows[1], "` "); w0 != w1 {
+		t.Errorf("pills not aligned: %d vs %d", w0, w1)
 	}
 }
 
-// TestProgressResetBelowBar asserts the reset window is on its own line below
-// the bar (not trailing the bar row), indented under the bar's start column.
-func TestProgressResetBelowBar(t *testing.T) {
-	u, l := 42.0, 100.0
-	reset := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	line := metricLine{
-		Type: lineProgress, Label: "Session", Used: &u, Limit: &l,
-		Format: &lineFormat{Kind: formatPercent}, ResetsAt: &reset,
+// liveSample mirrors the real /v1/usage shape observed in production
+// (progress + spend text + barChart trend + model-mix text).
+const liveSample = `{
+  "providerId": "codex",
+  "displayName": "Codex",
+  "plan": "Pro 20x",
+  "lines": [
+    {"type":"progress","label":"Weekly","used":44.0,"limit":100.0,"format":{"kind":"percent"},"resetsAt":"2026-06-11T04:32:49.000Z","periodDurationMs":604800000,"color":null},
+    {"type":"progress","label":"Credits","used":1000.0,"limit":1000.0,"format":{"kind":"count","suffix":"credits"},"resetsAt":null,"periodDurationMs":null,"color":null},
+    {"type":"text","label":"Today","value":"$415.12 · 474M tokens","color":null,"subtitle":null},
+    {"type":"barChart","label":"Usage Trend","points":[
+      {"label":"6/8","value":571809733.0,"valueLabel":"572M tokens"},
+      {"label":"6/9","value":516472937.0,"valueLabel":"516M tokens"},
+      {"label":"6/10","value":164600215.0,"valueLabel":"165M tokens"}],
+     "note":"Estimated from local Codex logs.","color":"#74AA9C"},
+    {"type":"text","label":"gpt-5.5","value":"99.9%","color":null,"subtitle":null}
+  ],
+  "fetchedAt":"2026-06-10T11:26:09Z"
+}`
+
+func TestRenderLiveSampleCoversAllVariants(t *testing.T) {
+	snap, err := parseSnapshot([]byte(liveSample))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	block := progressBlock([]metricLine{line})
-	rows := strings.Split(strings.Trim(block, "`\n"), "\n")
-	if len(rows) != 2 {
-		t.Fatalf("want bar row + reset row, got %d: %q", len(rows), block)
+	att := renderSnapshot(snap)
+
+	if strings.Contains(att.Text, "unsupported line type") {
+		t.Errorf("text has unsupported placeholder: %q", att.Text)
 	}
-	if !strings.Contains(rows[0], "█") || strings.Contains(rows[0], "resets") {
-		t.Errorf("bar row should hold the bar and no reset text: %q", rows[0])
+	// Fields preserve API order: Today, Usage Trend, gpt-5.5.
+	if len(att.Fields) != 3 {
+		t.Fatalf("fields = %+v", att.Fields)
 	}
-	if !strings.Contains(rows[1], "resets in 2h") {
-		t.Errorf("reset row missing reset window: %q", rows[1])
+	for i, want := range []string{"Today", "Usage Trend", "gpt-5.5"} {
+		if att.Fields[i].Title != want {
+			t.Errorf("field %d title = %q, want %q", i, att.Fields[i].Title, want)
+		}
+		v, _ := att.Fields[i].Value.(string)
+		if strings.Contains(v, "unsupported line type") {
+			t.Errorf("field %d has unsupported placeholder: %q", i, v)
+		}
 	}
-	// Reset row indents past the label so it sits under the bar.
-	barCol := strings.Index(rows[0], "█")
-	resetCol := strings.IndexFunc(rows[1], func(r rune) bool { return r != ' ' })
-	if resetCol < barCol {
-		t.Errorf("reset row not indented under bar: resetCol=%d barCol=%d\n%s", resetCol, barCol, block)
+	// Trend renders full-width with a sparkline scaled to the peak and a
+	// latest/peak caption plus the note.
+	trend := att.Fields[1]
+	if trend.Short {
+		t.Errorf("trend field should be full-width")
+	}
+	v, _ := trend.Value.(string)
+	if !strings.Contains(v, "`██▃`") {
+		t.Errorf("sparkline wrong: %q", v)
+	}
+	if !strings.Contains(v, "Latest 6/10: 165M tokens · Peak 6/8: 572M tokens") {
+		t.Errorf("caption wrong: %q", v)
+	}
+	if !strings.Contains(v, "_Estimated from local Codex logs._") {
+		t.Errorf("note wrong: %q", v)
+	}
+	// Credits (count) renders with its raw value and must not drive severity:
+	// Weekly 44% is the worst percent line -> green is wrong, want good color?
+	// 44% < 70 -> good. A red card here would mean credits drove severity.
+	if att.Color != colorGood {
+		t.Errorf("color = %q, want good (count line must not drive severity)", att.Color)
+	}
+	if !strings.Contains(att.Text, "1000/1000 credits") {
+		t.Errorf("text missing credits value: %q", att.Text)
+	}
+}
+
+func TestSparklineScaling(t *testing.T) {
+	pts := []chartPoint{{Value: 0}, {Value: 1}, {Value: 50}, {Value: 100}}
+	if got := sparkline(pts); got != "▁▁▄█" {
+		t.Errorf("sparkline = %q, want ▁▁▄█", got)
+	}
+	if got := sparkline(nil); got != "" {
+		t.Errorf("sparkline(nil) = %q", got)
+	}
+	// All-zero charts stay flat instead of dividing by zero.
+	if got := sparkline([]chartPoint{{Value: 0}, {Value: 0}}); got != "▁▁" {
+		t.Errorf("sparkline(zeros) = %q", got)
 	}
 }
