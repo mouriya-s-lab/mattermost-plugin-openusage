@@ -37,22 +37,25 @@ func renderSnapshots(snaps []providerSnapshot) []*model.SlackAttachment {
 	return out
 }
 
-// renderSnapshot builds one provider card. Progress limits render as aligned
-// Unicode bars in a monospace block (mirroring the OpenUsage menubar); text and
-// badge lines render as a compact two-column field grid below.
+// renderSnapshot builds one provider card. Progress limits render one per line
+// as an inline-code `bar  value` pill (inline code wraps instead of clipping
+// the way a fenced block does in the Mattermost webapp) followed by the bold
+// label and the reset window. Every other line variant renders as a field
+// below, in API order: text/badge as two-column short fields, barChart as a
+// full-width sparkline field.
 func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 	title := statusDot(snap) + " " + displayName(snap)
 	if plan := strings.TrimSpace(derefString(snap.Plan)); plan != "" {
 		title += "  ·  " + plan
 	}
 
-	var progress, textual []metricLine
+	var progress, rest []metricLine
 	for _, line := range snap.Lines {
 		switch line.Type {
 		case lineProgress:
 			progress = append(progress, line)
 		default:
-			textual = append(textual, line)
+			rest = append(rest, line)
 		}
 	}
 
@@ -61,49 +64,47 @@ func renderSnapshot(snap providerSnapshot) *model.SlackAttachment {
 		Color:  snapshotColor(snap),
 		Footer: snapshotFooter(snap),
 	}
-	att.Text = progressBlock(progress)
-	att.Fields = textualFields(textual)
+	att.Text = progressLines(progress)
+	att.Fields = lineFields(rest)
 	if att.Text == "" && len(att.Fields) == 0 {
 		att.Text = "_No usage lines returned._"
 	}
 	return att
 }
 
-// progressBlock renders the progress lines as an aligned monospace table. The
-// bar row is `label  bar  value`; when a line has a reset window it goes on its
-// own indented line *below* the bar (`↳ resets in …`) so the bar row stays
-// narrow and the reset is visible without expanding the card.
-func progressBlock(lines []metricLine) string {
+// progressLines renders progress lines one per line:
+//
+//	`████░░░░░░░░   16%` **Session** · resets in 3h
+//
+// The bar and value share one inline-code span so they stay monospace-aligned
+// across lines; percent values are right-padded to keep the pill width stable.
+func progressLines(lines []metricLine) string {
 	if len(lines) == 0 {
 		return ""
 	}
-
-	type row struct{ label, bar, value, reset string }
-	rows := make([]row, 0, len(lines))
-	labelW := 0
+	rows := make([]string, 0, len(lines))
 	for _, line := range lines {
-		r := row{
-			label: emptyAs(strings.TrimSpace(line.Label), "—"),
-			bar:   usageBar(lineUsedPercent(line)),
-			value: progressValue(line),
-			reset: relativeReset(line.ResetsAt),
+		value := progressValue(line)
+		if progressFormatKind(line) == formatPercent {
+			value = fmt.Sprintf("%4s", value)
 		}
-		labelW = max(labelW, len([]rune(r.label)))
-		rows = append(rows, r)
+		row := "`" + usageBar(lineUsedPercent(line)) + "  " + value + "`" +
+			" **" + emptyAs(strings.TrimSpace(line.Label), "—") + "**"
+		if reset := relativeReset(line.ResetsAt); reset != "" {
+			row += " · " + reset
+		}
+		rows = append(rows, row)
 	}
+	return strings.Join(rows, "\n")
+}
 
-	// Reset lines indent to the bar's start column so they read as a caption.
-	indent := strings.Repeat(" ", labelW+2)
-	var b strings.Builder
-	b.WriteString("```\n")
-	for _, r := range rows {
-		fmt.Fprintf(&b, "%s  %s  %s\n", padRune(r.label, labelW), r.bar, r.value)
-		if r.reset != "" {
-			b.WriteString(indent + "↳ " + r.reset + "\n")
-		}
+// progressFormatKind returns the effective format kind of a progress line
+// (percent when absent, per the OpenUsage schema default).
+func progressFormatKind(line metricLine) formatKind {
+	if line.Format != nil && line.Format.Kind != "" {
+		return line.Format.Kind
 	}
-	b.WriteString("```")
-	return b.String()
+	return formatPercent
 }
 
 // usageBar draws a fixed-width bar from a 0..100 percentage. NaN renders empty.
@@ -157,25 +158,101 @@ func progressValue(line metricLine) string {
 	}
 }
 
-// textualFields renders text/badge lines as a two-column field grid.
-func textualFields(lines []metricLine) []*model.SlackAttachmentField {
+// lineFields renders the non-progress lines as attachment fields, preserving
+// API order: text/badge become two-column short fields, barChart becomes a
+// full-width sparkline field.
+func lineFields(lines []metricLine) []*model.SlackAttachmentField {
 	if len(lines) == 0 {
 		return nil
 	}
 	fields := make([]*model.SlackAttachmentField, 0, len(lines))
 	for _, line := range lines {
-		var value string
 		switch line.Type {
 		case lineText:
-			value = emptyAs(line.Value, "—")
+			fields = append(fields, shortField(emptyAs(line.Label, "—"), withSubtitle(emptyAs(line.Value, "—"), line.Subtitle)))
 		case lineBadge:
-			value = emptyAs(line.Text, "—")
+			fields = append(fields, shortField(emptyAs(line.Label, "—"), withSubtitle(emptyAs(line.Text, "—"), line.Subtitle)))
+		case lineBarChart:
+			fields = append(fields, barChartField(line))
 		default:
-			value = "unsupported line type \"" + string(line.Type) + "\""
+			fields = append(fields, shortField(emptyAs(line.Label, "—"), "unsupported line type \""+string(line.Type)+"\""))
 		}
-		fields = append(fields, shortField(emptyAs(line.Label, "—"), withSubtitle(value, line.Subtitle)))
 	}
 	return fields
+}
+
+// barChartField renders a barChart line as a full-width field: a sparkline in
+// an inline-code span, a latest/peak caption, and the chart note in italics.
+func barChartField(line metricLine) *model.SlackAttachmentField {
+	parts := make([]string, 0, 3)
+	if spark := sparkline(line.Points); spark != "" {
+		parts = append(parts, "`"+spark+"`")
+	}
+	if caption := chartCaption(line.Points); caption != "" {
+		parts = append(parts, caption)
+	}
+	if note := strings.TrimSpace(derefString(line.Note)); note != "" {
+		parts = append(parts, "_"+note+"_")
+	}
+	value := "—"
+	if len(parts) > 0 {
+		value = strings.Join(parts, "\n")
+	}
+	return &model.SlackAttachmentField{
+		Title: emptyAs(line.Label, "—"),
+		Value: value,
+		Short: false,
+	}
+}
+
+// sparkline maps chart points onto ▁..█ (8 levels) scaled to the peak value.
+func sparkline(points []chartPoint) string {
+	if len(points) == 0 {
+		return ""
+	}
+	levels := []rune("▁▂▃▄▅▆▇█")
+	peak := 0.0
+	for _, p := range points {
+		if p.Value > peak {
+			peak = p.Value
+		}
+	}
+	var b strings.Builder
+	for _, p := range points {
+		idx := 0
+		if peak > 0 && p.Value > 0 {
+			idx = int(math.Ceil(p.Value/peak*8)) - 1
+			idx = max(0, min(idx, len(levels)-1))
+		}
+		b.WriteRune(levels[idx])
+	}
+	return b.String()
+}
+
+// chartCaption summarizes a chart as its latest and peak points.
+func chartCaption(points []chartPoint) string {
+	if len(points) == 0 {
+		return ""
+	}
+	last := points[len(points)-1]
+	peak := points[0]
+	for _, p := range points {
+		if p.Value > peak.Value {
+			peak = p
+		}
+	}
+	return "Latest " + pointLabel(last) + " · Peak " + pointLabel(peak)
+}
+
+func pointLabel(p chartPoint) string {
+	value := strings.TrimSpace(p.ValueLabel)
+	if value == "" {
+		value = trimFloat(p.Value)
+	}
+	if label := strings.TrimSpace(p.Label); label != "" {
+		return label + ": " + value
+	}
+	return value
 }
 
 // relativeReset turns an ISO reset timestamp into "resets in 2h" / "resets in
@@ -241,10 +318,12 @@ func statusDot(snap providerSnapshot) string {
 }
 
 // snapshotColor picks a card color from the worst progress usage in the card.
+// Count-format lines are skipped: their direction is ambiguous (a credit
+// balance reads "1000/1000" when full), so they must not drive severity.
 func snapshotColor(snap providerSnapshot) string {
 	maxPct := math.NaN()
 	for _, line := range snap.Lines {
-		if line.Type != lineProgress {
+		if line.Type != lineProgress || progressFormatKind(line) == formatCount {
 			continue
 		}
 		pct := lineUsedPercent(line)
@@ -333,16 +412,6 @@ func parseISO(value string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
-}
-
-// padRune right-pads s with spaces to w display runes (rune-aware so multibyte
-// labels still align in the monospace block).
-func padRune(s string, w int) string {
-	n := len([]rune(s))
-	if n >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-n)
 }
 
 func withSubtitle(value string, subtitle *string) string {

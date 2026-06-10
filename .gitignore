@@ -2,3 +2,7 @@
 /dist/
 /server/dist/
 /build/pluginctl/pluginctl
+
+# Local browser-testing artifacts
+/screenshots/
+/skills/agent-browser/.env
