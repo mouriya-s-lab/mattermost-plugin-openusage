@@ -120,8 +120,22 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 		return &model.CommandResponse{}, nil
 	}
 
-	loading := loadingPost(args.ChannelId, botID)
-	_ = client.Post.CreatePost(loading)
+	// Deliver the result by editing one bot post in place. Deleting posts the
+	// user is currently looking at leaves "(message deleted)" placeholders in
+	// the webapp until a reload, so the loading state reuses the newest bot
+	// post when it is still the latest thing in the channel, and the result
+	// always lands as an edit of the loading post — never delete+create.
+	loading := p.reusableBotPost(args.ChannelId, botID)
+	if loading != nil {
+		model.ParseSlackAttachment(loading, []*model.SlackAttachment{loadingAttachment()})
+		if err := client.Post.UpdatePost(loading); err != nil {
+			loading = nil
+		}
+	}
+	if loading == nil {
+		loading = loadingPost(args.ChannelId, botID)
+		_ = client.Post.CreatePost(loading)
+	}
 
 	// Fetch off the slash-command path so a slow netbird round trip never blocks
 	// the handler past Mattermost's response deadline.
@@ -129,19 +143,43 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	return &model.CommandResponse{}, nil
 }
 
-func (p *Plugin) finishCommand(client *pluginapi.Client, uc *usageClient, channelID, botID, loadingPostID string, req openusageRequest) {
+func (p *Plugin) finishCommand(client *pluginapi.Client, uc *usageClient, channelID, botID, resultPostID string, req openusageRequest) {
 	attachments := fetchAndRender(uc, req)
 
-	if loadingPostID != "" {
-		_ = client.Post.DeletePost(loadingPostID)
+	post, err := client.Post.GetPost(resultPostID)
+	if err == nil && post != nil {
+		model.ParseSlackAttachment(post, attachments)
+		err = client.Post.UpdatePost(post)
 	}
-
-	post := botPost(channelID, botID, attachments...)
-	if err := client.Post.CreatePost(post); err != nil {
-		client.Log.Error("create openusage result post failed", "err", err)
-		return
+	if err != nil || post == nil {
+		// The loading post is gone (deleted out from under us): fall back to a
+		// fresh post so the result still lands.
+		post = botPost(channelID, botID, attachments...)
+		if err := client.Post.CreatePost(post); err != nil {
+			client.Log.Error("create openusage result post failed", "err", err)
+			return
+		}
 	}
 	go p.clearBotMessagesExcept(channelID, botID, post.Id)
+}
+
+// reusableBotPost returns the channel's newest post when it belongs to the bot
+// and can therefore be edited in place without reordering the timeline. Any
+// other situation (user message after the card, empty channel) returns nil.
+func (p *Plugin) reusableBotPost(channelID, botID string) *model.Post {
+	client := p.getClient()
+	if client == nil {
+		return nil
+	}
+	postList, err := client.Post.GetPostsForChannel(channelID, 0, 1)
+	if err != nil || postList == nil || len(postList.Order) == 0 {
+		return nil
+	}
+	post := postList.Posts[postList.Order[0]]
+	if post == nil || post.UserId != botID || post.DeleteAt != 0 {
+		return nil
+	}
+	return post
 }
 
 func fetchAndRender(uc *usageClient, req openusageRequest) []*model.SlackAttachment {
@@ -185,12 +223,16 @@ func providerErrorAttachment(providerID string, err error) *model.SlackAttachmen
 	}
 }
 
-func loadingPost(channelID, botID string) *model.Post {
-	post := &model.Post{ChannelId: channelID, UserId: botID}
-	model.ParseSlackAttachment(post, []*model.SlackAttachment{{
+func loadingAttachment() *model.SlackAttachment {
+	return &model.SlackAttachment{
 		Text:  "Loading…",
 		Color: colorAccent,
-	}})
+	}
+}
+
+func loadingPost(channelID, botID string) *model.Post {
+	post := &model.Post{ChannelId: channelID, UserId: botID}
+	model.ParseSlackAttachment(post, []*model.SlackAttachment{loadingAttachment()})
 	return post
 }
 
